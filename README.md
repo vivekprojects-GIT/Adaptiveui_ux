@@ -1,10 +1,14 @@
----
-title: AdaptiveUI UX
-emoji: 🦀
+﻿---
+title: AdaptiveUI (anupa)
+emoji: "🧠"
 colorFrom: indigo
-colorTo: red
+colorTo: blue
 sdk: docker
 pinned: false
 ---
 
-Check out the configuration reference at https://huggingface.co/docs/hub/spaces-config-reference
+# AdaptiveUI (anupa)
+
+Claude-style single-call response + widget HTML rendered in an iframe.
+
+This Space runs the `anupa` server on port 7860.
