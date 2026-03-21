@@ -5,9 +5,8 @@ from dotenv import load_dotenv
 import os
 
 load_dotenv(override=True)
-# Runtime mode: 'openai_compat' uses an OpenAI-compatible remote API,
-# otherwise the code will prefer Anthropic (Claude) endpoints.
-LLM_MODE = os.getenv("LLM_MODE", "openai_compat").lower()
+# Runtime mode: 'anthropic' uses Claude; 'openai_compat' uses OpenAI-compatible API.
+LLM_MODE = os.getenv("LLM_MODE", "anthropic").lower()
 
 # If false (default), strategy “primitives” are treated as soft style hints
 # and the backend will not aggressively post-process text to enforce them.
