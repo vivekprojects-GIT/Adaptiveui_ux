@@ -1,4 +1,4 @@
-# Anupa: Adaptive Presentation Engine — Complete Reference
+# Vivek: Adaptive Presentation Engine — Complete Reference
 
 A professional, modular backend demonstrating Bayesian strategy selection and real-time posterior updating. This app learns user preferences and adapts its response format (bullet points, prose, questions, etc.) based on observed rewards.
 
