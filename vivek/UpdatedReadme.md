@@ -28,7 +28,8 @@ backend/
 
 Root folder
 ├── app.py                # Launcher (imports backend.server.run_server)
-├── index.html            # Frontend demo UI
+├── frontend/
+│   └── index.html        # Frontend demo UI
 ├── Dockerfile            # Container image
 ├── requirements.txt      # Python dependencies
 ├── README.md             # Original readme (kept for reference)

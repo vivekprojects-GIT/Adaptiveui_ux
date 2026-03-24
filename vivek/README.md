@@ -6,6 +6,27 @@ app_port: 7860
 
 A web demo of the Contextual Hierarchical Bayesian Architecture pipeline.
 
+## Project structure (modular layout)
+
+```
+vivek/
+├── frontend/           # UI assets
+│   ├── index.html      # Single-page app (chat, widgets, posterior viz)
+│   └── README.md       # Frontend documentation
+├── backend/            # Python API and logic
+│   ├── config.py       # Env vars, LLM modes, Thompson Sampling params
+│   ├── server.py       # HTTP server, API routes, serves frontend at GET /
+│   ├── llm.py          # Anthropic and OpenAI-compatible LLM calls
+│   ├── engine.py       # Bayesian engine (Thompson Sampling)
+│   ├── widget_prompt.py
+│   ├── combined_prompt.py
+│   └── primitives.json # Strategy definitions
+├── app.py              # Entry point
+├── requirements.txt
+├── .env.example        # Template for API keys (copy to .env)
+└── .env                # Your keys (gitignored)
+```
+
 ## What it shows
 - **Live strategy selection** via Thompson Sampling over the Bayesian posterior
 - **Posterior updating in real-time** as you rate responses (👍 / 👎)
@@ -18,11 +39,17 @@ A web demo of the Contextual Hierarchical Bayesian Architecture pipeline.
 
 ### 1. Install Python dependencies
 ```bash
-pip install numpy
-# (flask is not needed — the server is built-in)
+pip install -r requirements.txt
+# (numpy, python-dotenv, anthropic — server is built-in, no Flask)
 ```
 
-### 2. Configure model (optional)
+### 2. Configure environment
+Copy the example env file and add your API keys:
+```bash
+cp .env.example .env
+# Edit .env and add your OPENAI_API_KEY and/or ANTHROPIC_API_KEY
+```
+
 This app supports:
 - OpenAI-compatible providers (via `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL`)
 - Anthropic Claude (via `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`)
@@ -34,7 +61,7 @@ python app.py
 
 ### 4. Open in browser
 ```
-http://localhost:5000
+http://localhost:5051   # or PORT from env (Docker uses 7860)
 ```
 
 ---

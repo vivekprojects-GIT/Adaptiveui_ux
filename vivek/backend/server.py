@@ -1,4 +1,16 @@
-"""HTTP server and request handlers for the Adaptive Presentation Engine backend."""
+"""HTTP server and request handlers for the Adaptive Presentation Engine backend.
+
+Serves:
+  GET /              - Frontend (index.html from frontend/)
+  GET /api/health    - LLM connectivity check
+  GET /api/state     - Thompson Sampling posterior and user state
+  POST /api/chat     - Adaptive chat (strategy + response + widget)
+  POST /api/chat_plain - Baseline chat (no strategy selection)
+  POST /api/rate     - Feedback (thumbs up/down) for posterior update
+  POST /api/reset    - Reset user session
+
+Uses ThreadingMixIn for concurrent requests. CORS enabled for all origins.
+"""
 
 import json
 import os
@@ -28,6 +40,78 @@ from .utils import (
     negative_strength,
 )
 
+def _parse_streamed_response(chunks):
+    """Parse streaming LLM output, yielding (response_delta, ...) and collecting widget.
+
+    Yields:
+        ("response_delta", str) - text to stream to user
+        ("complete", response_text, widget_raw) - when fully parsed
+    """
+    buffer = ""
+    state = "preamble"  # preamble | response | widget
+    response_sent_len = 0
+    response_text = ""
+    response_end_tag = "</RESPONSE>"
+    response_start_tag = "<RESPONSE>"
+    widget_start_tag = "<WIDGET>"
+    widget_end_tag = "</WIDGET>"
+    tag_max_len = max(len(response_end_tag), len(widget_end_tag))
+
+    for chunk in chunks:
+        if not chunk:
+            continue
+        buffer += chunk
+        buf_upper = buffer.upper()
+
+        if state == "preamble":
+            if response_start_tag.upper() in buf_upper:
+                idx = buf_upper.find(response_start_tag.upper()) + len(response_start_tag)
+                buffer = buffer[idx:]
+                buf_upper = buffer.upper()
+                state = "response"
+                response_sent_len = 0
+
+        if state == "response":
+            if response_end_tag.upper() in buf_upper:
+                end_idx = buf_upper.find(response_end_tag.upper())
+                to_send = buffer[:end_idx][response_sent_len:]
+                if to_send:
+                    yield ("response_delta", to_send)
+                response_text = buffer[:end_idx].strip()
+                buffer = buffer[end_idx + len(response_end_tag):]
+                buf_upper = buffer.upper()
+                state = "widget_looking"
+            else:
+                safe_len = max(0, len(buffer) - tag_max_len)
+                if safe_len > response_sent_len:
+                    to_send = buffer[response_sent_len:safe_len]
+                    yield ("response_delta", to_send)
+                    response_sent_len = safe_len
+
+        if state == "widget_looking":
+            if widget_start_tag.upper() in buf_upper:
+                idx = buf_upper.find(widget_start_tag.upper()) + len(widget_start_tag)
+                buffer = buffer[idx:]
+                buf_upper = buffer.upper()
+                state = "widget"
+
+        if state == "widget":
+            if widget_end_tag.upper() in buf_upper:
+                end_idx = buf_upper.find(widget_end_tag.upper())
+                widget_raw = buffer[:end_idx].strip()
+                yield ("complete", response_text, widget_raw)
+                return
+
+    # Stream ended without full parse - yield what we have
+    if state == "response" and buffer:
+        remaining = buffer[response_sent_len:]
+        if remaining:
+            yield ("response_delta", remaining)
+        response_text = buffer
+    widget_raw = buffer if state == "widget" else ""
+    yield ("complete", response_text, widget_raw)
+
+
 def _looks_truncated_widget_html(html: str) -> bool:
     """Heuristic check for obviously cut-off widget HTML."""
     if not html:
@@ -56,6 +140,8 @@ def _bool_env(name: str, default: bool) -> bool:
 
 
 class Handler(BaseHTTPRequestHandler):
+    """Handles all HTTP requests. Suppresses default request logging."""
+
     def log_message(self, *a):
         pass
 
@@ -74,6 +160,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _html(self):
+        """Serve the frontend index.html (from frontend/ folder)."""
         try:
             html = config.INDEX_HTML.read_bytes()
         except FileNotFoundError:
@@ -298,58 +385,14 @@ class Handler(BaseHTTPRequestHandler):
                 raw_preview = (raw_combined or "")[:800]
                 if widget_mode != "json":
                     # Never return a blank iframe: serve a safe interactive placeholder mini-app.
-                    placeholder = f"""
-<html><head></head><body>
+                    placeholder = """<html><head></head><body>
   <div class="widget-root card">
     <div class="card-title">Interactive widget</div>
     <div style="color:var(--text2);font-size:13px;line-height:1.6">
-      I couldn't generate a full widget for this turn. This placeholder stays interactive and can request the missing data.
-    </div>
-    <div class="ctrl-row" style="margin-top:12px">
-      <div class="ctrl-lbl">Assumption</div>
-      <input id="assump" type="range" min="0" max="100" step="1" value="50" style="flex:1" />
-      <div class="ctrl-val" id="assumpv">50</div>
-    </div>
-    <div id="chart" class="raised" style="height:260px;margin-top:10px"></div>
-    <div class="btn-group" style="margin-top:10px">
-      <button class="btn" id="ask_range">Ask for date range</button>
-      <button class="btn" id="ask_source">Ask for data source</button>
+      Could not generate a widget for this turn. Try rephrasing or providing more details.
     </div>
   </div>
-  <script src="https://cdn.jsdelivr.net/npm/echarts/dist/echarts.min.js"></script>
-  <script>
-  const data = [
-    {{name:'Series A', base: 100}},
-    {{name:'Series B', base: 100}}
-  ];
-  const state = {{assumption: 50}};
-  function compute(state, data) {{
-    const k = (state.assumption/50);
-    return {{
-      labels: data.map(d=>d.name),
-      values: data.map((d,i)=>Math.round(d.base*(i? (1.15*k):(1.05*k))))
-    }};
-  }}
-  let chart;
-  function render() {{
-    const c = compute(state, data);
-    document.getElementById('assumpv').textContent = String(state.assumption);
-    if (!chart) chart = echarts.init(document.getElementById('chart'));
-    chart.setOption({{
-      backgroundColor:'transparent',
-      tooltip:{{trigger:'axis'}},
-      xAxis:{{type:'category',data:c.labels,axisLabel:{{color:'#5a5f72'}}}},
-      yAxis:{{type:'value',axisLabel:{{color:'#5a5f72'}}}},
-      series:[{{type:'bar',data:c.values}}]
-    }});
-  }}
-  document.getElementById('assump').addEventListener('input', (e)=>{{ state.assumption = +e.target.value; render(); }});
-  document.getElementById('ask_range').onclick = ()=> sendPrompt('Provide a date range to plot (e.g., 2020-01-01 to 2024-12-31).');
-  document.getElementById('ask_source').onclick = ()=> sendPrompt('Which data source should we use for SPY and QQQ prices (yfinance, stooq, other)?');
-  render();
-  </script>
-</body></html>
-""".strip()
+</body></html>""".strip()
                     widget_html = inject_design_system(placeholder)
                     widget_height = estimate_widget_height(widget_html)
                     widget_debug = "fallback_widget_generated"
@@ -531,6 +574,7 @@ class Handler(BaseHTTPRequestHandler):
                 "auto_reason": ev["reason"],
             })
 
+            t0 = time.time()
             try:
                 if adapt_mode == "openai_compat":
                     raw_combined, elapsed, mode = llm.call_openai_compat(
@@ -540,16 +584,84 @@ class Handler(BaseHTTPRequestHandler):
                         max_tokens=combined_max_tokens,
                         temperature=0.2,
                     )
+                    response, widget_payload_raw = parse_combined_output(raw_combined)
+                    if not response:
+                        response = raw_combined.strip()
+                    if config.STRICT_PRIMITIVES:
+                        response = enforce_response(strat, response)
+                    widget_mode = getattr(config, "WIDGET_MODE", "json").strip().lower()
+                    widget_html = ""
+                    widget_schema = ""
+                    widget_height = 0
+                    widget_debug = "nonstream"
+                    if widget_payload_raw:
+                        if widget_mode == "json":
+                            widget_schema = widget_payload_raw
+                        else:
+                            if _looks_truncated_widget_html(widget_payload_raw):
+                                widget_debug = "stream_widget_truncated"
+                            else:
+                                widget_html = widget_payload_raw
+                                widget_height = estimate_widget_height(widget_payload_raw)
+                    else:
+                        if widget_mode != "json":
+                            placeholder = "<html><head></head><body><div class='widget-root card'><div class='card-title'>Interactive widget</div><div class='empty'>No widget returned.</div></div></body></html>"
+                            widget_html = inject_design_system(placeholder)
+                            widget_height = estimate_widget_height(widget_html)
+                            widget_debug = "fallback_widget_generated"
+                    for i in range(0, len(response), 180):
+                        send_nd({"type": "response_delta", "delta": response[i : i + 180]})
+                    payload = widget_schema if widget_mode == "json" else widget_html
+                    if payload:
+                        for i in range(0, len(payload), 900):
+                            send_nd({"type": "widget_delta", "delta": payload[i : i + 900]})
                 elif adapt_mode == "anthropic":
-                    # Use non-streaming call with wall-clock timeout (more robust than the SDK stream
-                    # when the provider stalls), then optionally "replay" deltas to the UI.
-                    raw_combined, elapsed, mode = llm.call_anthropic(
+                    stream = llm.stream_anthropic(
                         combined_prompt,
                         combined_system,
                         timeout=combined_timeout,
                         max_tokens=combined_max_tokens,
                         temperature=0.2,
                     )
+                    response = ""
+                    widget_payload_raw = ""
+                    for event_type, *args in _parse_streamed_response(stream):
+                        if event_type == "response_delta":
+                            send_nd({"type": "response_delta", "delta": args[0]})
+                        elif event_type == "complete":
+                            response, widget_payload_raw = args[0], args[1]
+                            break
+                    elapsed = round(time.time() - t0, 1)
+                    mode = "anthropic"
+                    if not response and not widget_payload_raw:
+                        response = "(No content)"
+                    if config.STRICT_PRIMITIVES and response:
+                        response = enforce_response(strat, response)
+                    widget_mode = getattr(config, "WIDGET_MODE", "json").strip().lower()
+                    widget_html = ""
+                    widget_schema = ""
+                    widget_height = 0
+                    widget_debug = "streamed"
+                    if widget_payload_raw:
+                        if widget_mode == "json":
+                            widget_schema = widget_payload_raw
+                        else:
+                            raw_widget = widget_payload_raw
+                            if "```" in raw_widget:
+                                fence = re.search(r"```(?:json|html)?\s*(.*?)```", raw_widget, re.DOTALL | re.IGNORECASE)
+                                raw_widget = fence.group(1).strip() if fence else re.sub(r"```\w*", "", raw_widget).strip()
+                            if "<" in raw_widget and ">" in raw_widget:
+                                if "<html" not in raw_widget.lower():
+                                    raw_widget = f"<html><head></head><body>{raw_widget}</body></html>"
+                                raw_widget = re.sub(r"<!DOCTYPE[^>]*>", "", raw_widget, flags=re.IGNORECASE).strip()
+                                widget_payload_raw = inject_design_system(raw_widget)
+                                if _looks_truncated_widget_html(widget_payload_raw):
+                                    widget_debug = "stream_widget_truncated"
+                                else:
+                                    widget_html = widget_payload_raw
+                                    widget_height = estimate_widget_height(widget_html)
+                    if widget_mode != "json" and not widget_html:
+                        widget_debug = "no_widget"
                 else:
                     raise RuntimeError("Unsupported ADAPTIVE_LLM_MODE (expected openai_compat or anthropic)")
             except Exception as e:
@@ -558,47 +670,6 @@ class Handler(BaseHTTPRequestHandler):
                     msg = repr(e)
                 send_done_error(f"LLM error ({type(e).__name__}): {msg}")
                 return
-
-            response, widget_payload_raw = parse_combined_output(raw_combined)
-            if not response:
-                response = raw_combined.strip()
-            if config.STRICT_PRIMITIVES:
-                response = enforce_response(strat, response)
-
-            widget_debug = "nonstream"
-
-            widget_html = ""
-            widget_schema = ""
-            widget_height = 0
-            widget_mode = getattr(config, "WIDGET_MODE", "json").strip().lower()
-            if widget_payload_raw:
-                if widget_mode == "json":
-                    widget_schema = widget_payload_raw
-                else:
-                    if _looks_truncated_widget_html(widget_payload_raw):
-                        widget_debug = "stream_widget_truncated"
-                    else:
-                        widget_html = widget_payload_raw
-                        widget_height = estimate_widget_height(widget_payload_raw)
-            else:
-                if widget_mode != "json":
-                    placeholder = "<html><head></head><body><div class='widget-root card'><div class='card-title'>Interactive widget</div><div class='empty'>No widget returned; click to request missing data.</div><div class='btn-group'><button class='btn' onclick=\"sendPrompt('Provide a date range for the requested plot.')\">Ask for date range</button></div></div></body></html>"
-                    widget_html = inject_design_system(placeholder)
-                    widget_height = estimate_widget_height(widget_html)
-                    widget_debug = "fallback_widget_generated"
-
-            # Replay deltas so the UI doesn't look frozen (best-effort).
-            # The final "done" still contains the full response/widget.
-            try:
-                if response:
-                    for i in range(0, len(response), 180):
-                        send_nd({"type": "response_delta", "delta": response[i : i + 180]})
-                payload = widget_schema if widget_mode == "json" else widget_html
-                if payload:
-                    for i in range(0, len(payload), 900):
-                        send_nd({"type": "widget_delta", "delta": payload[i : i + 900]})
-            except Exception:
-                pass
 
             # Update history as in /api/chat.
             user["history"].append({"user": msg, "assistant": response})

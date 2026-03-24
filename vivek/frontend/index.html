@@ -1185,13 +1185,14 @@ async function send() {
 
   const respEl = document.getElementById(`${mid}_resp`);
 
-  // Iframe preview shell (gets widget HTML chunks token-by-token).
+  // Iframe for widget - only shown when we have a widget (conditional iframe).
   const mount = document.getElementById(`${mid}_wm`);
+  mount.style.display = 'none';
   const frame = document.createElement('iframe');
   frame.className = 'widget-frame';
   frame.setAttribute('sandbox', 'allow-scripts allow-same-origin');
   frame.style.height = '260px';
-  frame.srcdoc = mkWidgetStreamPreviewSrcdoc();
+  frame.srcdoc = '<!DOCTYPE html><html><body></body></html>';
   mount.appendChild(frame);
 
   let frameReady = false;
@@ -1275,6 +1276,10 @@ async function send() {
         }
 
         if (evt.type === 'widget_delta') {
+          if (evt.delta && mount.style.display === 'none') {
+            mount.style.display = 'block';
+            frame.srcdoc = mkWidgetStreamPreviewSrcdoc();
+          }
           postWidgetChunk(evt.delta);
         }
 
@@ -1304,10 +1309,13 @@ async function send() {
           if (elapsedEl) elapsedEl.textContent = (evt.elapsed !== null && evt.elapsed !== undefined) ? `${evt.elapsed}s` : '—';
 
           if (evt.widget_html && String(evt.widget_html).trim()) {
+            mount.style.display = 'block';
             frame.classList.remove('ready');
             frame.style.height = `${Number(evt.widget_height || 420)}px`;
             frame.srcdoc = evt.widget_html;
             frame.addEventListener('load', () => frame.classList.add('ready'), { once: true });
+          } else {
+            mount.style.display = 'none';
           }
 
           if (evt.auto_detected && evt.auto_r !== null) {
