@@ -84,3 +84,8 @@ K = len(STRATEGY_NAMES)
 HERE = Path(__file__).resolve().parent
 # Frontend entry point served at GET /. Modular layout: frontend/ holds all UI assets.
 INDEX_HTML = HERE.parent / "frontend" / "index.html"
+
+# Skills document — high-level chart/widget guidance injected into LLM prompts.
+# Override with SKILLS_PATH env var if needed.
+SKILLS_PATH = Path(os.getenv("SKILLS_PATH", str(HERE.parent / "skills.md")))
+SKILLS_CONTENT = SKILLS_PATH.read_text(encoding="utf-8") if SKILLS_PATH.exists() else ""

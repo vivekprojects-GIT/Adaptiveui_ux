@@ -35,7 +35,6 @@ from .combined_prompt import (
 from .utils import (
     fast_valence,
     enforce_response,
-    detect_format_override,
     detect_explore_trigger,
     negative_strength,
 )
@@ -293,8 +292,8 @@ class Handler(BaseHTTPRequestHandler):
                 auto_detected = True
                 auto_r        = reward
 
-            # --- NEW: explicit overrides + corrective exploration ---
-            explicit = detect_format_override(msg, config.STRATEGY_NAMES)
+            # --- Corrective exploration (no keyword-based strategy override) ---
+            explicit = False  # No keyword override; model understands the question
             force_explore = bool(detect_explore_trigger(msg) or (ev.get("neg", 0.0) >= config.NEG_EXPLORE_THRESHOLD))
             neg_s = negative_strength(ev)
 
@@ -302,29 +301,23 @@ class Handler(BaseHTTPRequestHandler):
                 uid, msg,
                 force_explore=force_explore,
                 neg_strength=neg_s,
-                explicit_strategy=explicit,
+                explicit_strategy=None,
             )
 
             format_rule = config.STRATEGIES.get(strat, "Be helpful and clear.")
-
-            # ── Single-call combined prompt (Claude-style) ─────────────────
             combined_max_tokens = getattr(config, "COMBINED_MAX_TOKENS", 2800)
-            # Keep the UI responsive by failing fast by default.
             combined_timeout = getattr(config, "COMBINED_TIMEOUT_SECONDS", 30)
 
+            # ── Combined single-call (response + widget in one LLM output) ──
             combined_system = build_combined_system_prompt(
                 strategy_id=strat,
                 format_rule=format_rule,
-                primitive_extra_context="",
+                primitive_extra_context=getattr(config, "SKILLS_CONTENT", "") or "",
                 user_message=msg,
                 forbidden_components=None,
                 required_components=None,
             )
-            combined_prompt = build_combined_user_prompt(
-                user_message=msg,
-                history=user["history"],
-            )
-
+            combined_prompt = build_combined_user_prompt(msg, user["history"])
             try:
                 adapt_mode = (config.ADAPTIVE_LLM_MODE or config.LLM_MODE).lower()
                 if adapt_mode == "openai_compat":
@@ -348,26 +341,21 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._json({"error": f"LLM error: {str(e)}"}, 500)
                 return
-
             if not raw_combined:
                 self._json({"error": "LLM returned empty response. Check model/service."}, 500)
                 return
 
-            # Parse combined output into text response + widget payload (HTML or JSON schema).
             response, widget_payload_raw = parse_combined_output(raw_combined)
-
             if not response:
                 response = raw_combined.strip()
-
             if config.STRICT_PRIMITIVES:
                 response = enforce_response(strat, response)
-
-            # ── Validate widget from single call ───────────────────────────
             widget_html = ""
             widget_schema = ""
             widget_height = 0
             widget_debug = ""
             widget_mode = getattr(config, "WIDGET_MODE", "json").strip().lower()
+            raw_preview = ""
 
             if widget_payload_raw:
                 if widget_mode == "json":
@@ -481,7 +469,7 @@ class Handler(BaseHTTPRequestHandler):
                 auto_detected = True
                 auto_r        = reward
 
-            explicit = detect_format_override(msg, config.STRATEGY_NAMES)
+            explicit = False  # No keyword override; model understands the question
             force_explore = bool(detect_explore_trigger(msg) or (ev.get("neg", 0.0) >= config.NEG_EXPLORE_THRESHOLD))
             neg_s = negative_strength(ev)
 
@@ -489,26 +477,21 @@ class Handler(BaseHTTPRequestHandler):
                 uid, msg,
                 force_explore=force_explore,
                 neg_strength=neg_s,
-                explicit_strategy=explicit,
+                explicit_strategy=None,
             )
 
             format_rule = config.STRATEGIES.get(strat, "Be helpful and clear.")
-
             combined_max_tokens = getattr(config, "COMBINED_MAX_TOKENS", 2800)
             combined_timeout = getattr(config, "COMBINED_TIMEOUT_SECONDS", 30)
-
             combined_system = build_combined_system_prompt(
                 strategy_id=strat,
                 format_rule=format_rule,
-                primitive_extra_context="",
+                primitive_extra_context=getattr(config, "SKILLS_CONTENT", "") or "",
                 user_message=msg,
                 forbidden_components=None,
                 required_components=None,
             )
-            combined_prompt = build_combined_user_prompt(
-                user_message=msg,
-                history=user["history"],
-            )
+            combined_prompt = build_combined_user_prompt(user_message=msg, history=user["history"])
 
             adapt_mode = (config.ADAPTIVE_LLM_MODE or config.LLM_MODE).lower()
 
@@ -611,7 +594,7 @@ class Handler(BaseHTTPRequestHandler):
                             widget_debug = "fallback_widget_generated"
                     for i in range(0, len(response), 180):
                         send_nd({"type": "response_delta", "delta": response[i : i + 180]})
-                    payload = widget_schema if widget_mode == "json" else widget_html
+                    payload = widget_schema if (widget_mode == "json" and widget_schema) else widget_html
                     if payload:
                         for i in range(0, len(payload), 900):
                             send_nd({"type": "widget_delta", "delta": payload[i : i + 900]})

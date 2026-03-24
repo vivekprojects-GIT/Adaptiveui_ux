@@ -41,8 +41,7 @@ WIDGET JSON SCHEMA MODE (WIDGET_MODE=json):
     { "type": "action_row", "id": "...", "buttons": [ { "id": "...", "label": "...", "intent": "..." }, ... ] }
 
 Data grounding:
-- Every entity/name/number used in the schema must come from the user message OR the numbers you include in <RESPONSE>.
-- Do not fabricate time series. If you cannot produce real points, use KPIs + a table.
+- Prefer data from user message or <RESPONSE>. When real data is unavailable, use illustrative/mock data and label it clearly (e.g. "Example data", "Mock data").
 
 Interactivity:
 - Use action_row buttons to request follow-ups via intent strings (e.g., "explain_methodology", "show_risks").
@@ -87,9 +86,10 @@ Universal reactive mini-app contract (follow for every widget):
   5) sendPrompt: ONLY when new knowledge/data is required. Include current state in the prompt.
 
 Charts:
-- MUST use ECharts as the primary visualization library.
-- Allowed CDN (preferred): https://cdn.jsdelivr.net/npm/echarts/dist/echarts.min.js
-- ECharts background must be transparent.
+- Use any public chart/library CDN from cdnjs.cloudflare.com, cdn.jsdelivr.net, unpkg.com, or cdn.plot.ly.
+- Chart backgrounds must be transparent for iframe embedding.
+- ECharts (preferred): https://cdn.jsdelivr.net/npm/echarts/dist/echarts.min.js
+- Plotly, D3, Chart.js, ApexCharts, and other public viz libraries are allowed.
 
 Forbidden (never include):
 - fetch / XMLHttpRequest / WebSocket
@@ -112,25 +112,24 @@ Rules:
 - NEVER return only text.
 - If you are uncertain or missing data, STILL return a valid widget that:
   - clearly labels any values as approximate, and
-  - includes controls + an ECharts chart driven by embedded (approximate) data, and
+  - includes controls + a chart (ECharts, Plotly, D3, or other) driven by embedded (approximate) data, and
   - includes one or more sendPrompt() buttons asking the user for the missing data (e.g., date range / source).
 If you fail to follow this contract, the system will break.
 """
 
 _LIBRARIES_RULE = """
-Allowed public libraries (CDN) for <WIDGET>:
-- ECharts (BI-grade charts): https://cdnjs.cloudflare.com/ajax/libs/echarts/5.5.0/echarts.min.js
-- Plotly.js (high-interactivity charts): https://cdn.plot.ly/plotly-2.30.0.min.js
-- D3.js (bespoke/custom visuals): https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js
-- Tabulator JS (tables): https://cdn.jsdelivr.net/npm/tabulator-tables@6.2.5/dist/js/tabulator.min.js
-- Tabulator CSS: https://cdn.jsdelivr.net/npm/tabulator-tables@6.2.5/dist/css/tabulator.min.css
-- Chart.js (only if truly needed): https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js
+Allowed libraries for <WIDGET> — use any public CDN from cdnjs.cloudflare.com, cdn.jsdelivr.net, unpkg.com, or cdn.plot.ly.
+Use whichever library produces the best visual for the use case. You may combine libraries (e.g. ECharts + Tabulator).
 
-Rules:
-- Do NOT use any other external libraries.
-- Choose exactly ONE chart engine for the main visualization: ECharts OR Plotly OR D3.
-- You may use Tabulator concurrently for detail tables.
-- Never mix multiple chart engines for the same chart area.
+Recommended (pick the best fit):
+- ECharts: https://cdn.jsdelivr.net/npm/echarts/dist/echarts.min.js
+- Plotly.js: https://cdn.plot.ly/plotly-2.30.0.min.js
+- D3.js: https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js
+- Chart.js: https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js
+- ApexCharts: https://cdn.jsdelivr.net/npm/apexcharts
+- Tabulator (tables): https://cdn.jsdelivr.net/npm/tabulator-tables/dist/js/tabulator.min.js + CSS
+
+You may use any other public library from these CDNs. Choose the library that creates the best, most accurate visualization.
 
 Color + theming baseline (applies to every engine):
 - Always define a JS palette (array of hex colors) and apply it explicitly to series/marks.
@@ -148,7 +147,7 @@ Library choice guidance (use the best fit; do not force the same layout every ti
 - Hierarchies: treemap only when parent/child is explicit; otherwise use grouped table.
 - Many series: avoid clutter; use small multiples or series toggles (do not plot >6 lines by default).
 - Tables: Tabulator always for scan/sort/filter when it helps (rows > 8 or user asked for a breakdown).
-- Prose/conceptual answers with no extractable dataset: return <WIDGET></WIDGET> or a compact visual card (no chart/table shells).
+- Prose/conceptual answers with no extractable dataset: still generate a widget using illustrative/mock data and label it clearly (e.g. "Example", "Illustrative", "Mock data").
 
 Engine-specific rendering requirements:
 - ECharts: option.backgroundColor must be 'transparent'; set textStyle/axis/grid colors from theme.
@@ -159,14 +158,13 @@ Engine-specific rendering requirements:
 _ANALYTICS_DEFAULTS_RULE = """
 Dashboard decision policy (data-driven; do this internally—do not output the reasoning):
 1) DATASET EXTRACTION:
-   - Extract ONE canonical dataset in JS: `const data = [...]` derived from extractable numeric anchors from this conversation:
-     (a) numeric values explicitly present in the user request/context you were given, and
-     (b) any numeric values you include inside <RESPONSE>.
-   - Every KPI/table/chart label and every numeric value used in the widget must be present somewhere in this conversation context (either in the user request/context or in <RESPONSE>).
+   - Prefer data from: (a) user request/context, (b) numeric values in <RESPONSE>.
+   - If sufficient data exists, use it. If not, use illustrative/mock data — but you MUST clearly label it (e.g. "Example data", "Mock data", "Illustrative") in the widget title or a visible subtitle.
 2) DATA-SHAPE DETECTION:
    - Determine shape: time-series, categorical ranking, composition, distribution, correlation, hierarchy, steps/process, or other.
 3) WIDGET WARRANT:
-   - If no extractable dataset (or too few points): return <WIDGET></WIDGET> or a compact single-card visual (no chart/table).
+   - Generate a widget wherever there is possibility. If extractable data exists, use it.
+   - If no extractable dataset (or too few points): use illustrative/mock data and clearly label it (e.g. "Example data", "Mock data", "Illustrative"). Do NOT return empty <WIDGET></WIDGET> when a chart/calculator/table would help.
 4) BI LAYOUT (only when warranted):
    - KPI row (3–6 tiles) → optional Controls row → Primary visualization → optional detail table → Insights (2–4).
 5) CROSS-VIEW INTERACTION:
@@ -245,36 +243,6 @@ def build_combined_system_prompt(
         else "Treat this as a style hint for <RESPONSE> (do not be rigid)."
     )
 
-    um = (user_message or "").lower()
-    explicit_visual = any(
-        k in um
-        for k in (
-            "plot",
-            "chart",
-            "graph",
-            "visualize",
-            "visualisation",
-            "visualization",
-            "dashboard",
-            "scatter",
-            "line chart",
-            "bar chart",
-            "histogram",
-            "heatmap",
-            "candlestick",
-        )
-    )
-    visual_override_block = ""
-    if explicit_visual:
-        visual_override_block = """
-═══════════════════════════════════════════════════════
-EXPLICIT VISUAL OVERRIDE (from user message)
-═══════════════════════════════════════════════════════
-The user explicitly asked for a visualization. Prioritize a chart/graph in <WIDGET>.
-If the Strategy/Rule suggests a table-only response, you may still answer in a chart-friendly structure and should include an interactive chart in <WIDGET>.
-Do not refuse a chart just because a "comparison_table" style was selected.
-"""
-
     widget_mode = getattr(config, "WIDGET_MODE", "json").strip().lower()
     widget_format_line = (
         "Complete self-contained HTML document for the interactive widget"
@@ -292,11 +260,11 @@ Do not refuse a chart just because a "comparison_table" style was selected.
         f"""- Hard output contract (never violate):
   - You MUST output BOTH tags exactly once: <RESPONSE>...</RESPONSE> and <WIDGET>...</WIDGET>.
   - Never omit <WIDGET> tags. If you choose “no widget”, output literally `<WIDGET></WIDGET>` (empty but present).
-- Widget CONTENT is OPTIONAL (based on data), but the <WIDGET> tags are REQUIRED.
+- Generate widget content wherever there is possibility. Use data from text when available; use mock/illustrative data when not, and label it. The <WIDGET> tags are REQUIRED.
 - Choose the UI based on the content in <RESPONSE> (data-driven). Do not follow any fixed template.
 - IMPORTANT: In HTML mode, the content inside <WIDGET> MUST be HTML (not JSON). It must contain opening <html> and closing </html>.
 - Return a COMPLETE, self-contained HTML document (opening <html> to closing </html>).
-- Inline ALL CSS in <style> and ALL JS in <script>. The only external files allowed are the CDNs below (and Tabulator CSS via <link>).
+- Inline ALL CSS in <style> and ALL JS in <script>. External files: use any public CDN (cdnjs, jsdelivr, unpkg, cdn.plot.ly) for charts, tables, and other libraries.
 - {_LIBRARIES_RULE.strip()}
 - {_ANALYTICS_DEFAULTS_RULE.strip()}
 - {_COLOR_THEMING_RULE.strip()}
@@ -311,6 +279,8 @@ Do not refuse a chart just because a "comparison_table" style was selected.
 - Slider initial values MUST match the exact numbers in your <RESPONSE>. Never invent defaults.
 - Use 0.5px solid borders — never 1px solid.
 - UI (HTML/CSS): use CSS variables only (no hardcoded hex/rgb). Charts (ECharts/Plotly/Chart.js): you MAY use hex colors in JS configs for palettes/series.
+- NO EMOJIS — never use emojis in widgets or labels. Use text only.
+- Neat and clean for any data: light backgrounds (#F5F5F5, #F2F2F2), clear typography, generous spacing. Minimal, professional layout. No decorative icons or clutter.
 {_REACTIVE_RUNTIME_RULE}
 {_DESIGN_SYSTEM_REMINDER}
 {_SENDPROMPT_RULE}"""
@@ -318,39 +288,49 @@ Do not refuse a chart just because a "comparison_table" style was selected.
         else _JSON_WIDGET_RULE.strip()
     )
 
+    combined_max_tokens = getattr(config, "COMBINED_MAX_TOKENS", 7500)
+    token_limit_block = f"""
+TOKEN LIMIT — you have ~{combined_max_tokens} tokens total for <RESPONSE> + <WIDGET>.
+- Prioritize completing the widget. Never stop mid-widget or truncate. A complete, functional widget is required.
+- When space is tight: shorten <RESPONSE> (2–5 sentences), not the <WIDGET>. The widget must always be full and working.
+- For comparison tables in <RESPONSE>: keep focused so the widget has room. Both must fit.
+"""
+
     return f"""You are an expert AI assistant with rich interactive output capabilities.
 
+Output style: No emojis. Neat, clean, professional — in both <RESPONSE> text and <WIDGET>.
+{token_limit_block}
 {_OUTPUT_CONTRACT_STRICT}
 
 For every response you produce TWO sections — response text and an interactive widget — in one generation.
 Default behavior: generate a NON-EMPTY <WIDGET> that turns your own <RESPONSE> into something interactive/visual.
+
+CRITICAL — Never describe a widget you do not generate. If your <RESPONSE> mentions "the dashboard below", "interactive chart", "explore visually", or anything that implies a visualization exists, you MUST output a complete, non-empty <WIDGET>. Do NOT say "the dashboard below" if you return empty <WIDGET></WIDGET>. Either generate the full widget HTML or do not mention it in the text at all.
+
 Only return an EMPTY widget block (<WIDGET></WIDGET>) when the turn is truly not “widget-worthy”:
-- greetings (hi, hello, hey), acknowledgements (thanks, ok, got it), chit-chat, or simple social responses
-- ultra-short answers with no structure and no numbers (1-2 sentences, no steps, no table, no formula)
-- when the user asks something that has no visual or interactive component
+- greetings (hi, hello, hey), acknowledgements (thanks, ok, got it), or pure chit-chat with no substance
 
-Important: users should NOT have to ask for “a widget” every time. If your <RESPONSE> contains structure or numbers,
-you are expected to automatically provide the best-fit widget.
+Our goal: create a widget wherever possible. Infer from the user's question and your <RESPONSE> content whether a widget would help. If your <RESPONSE> has structure, numbers, concepts, or comparisons that would benefit from something interactive, generate the best-fit widget.
 
-Exception (must generate non-empty widget):
-- If the user explicitly requests any of the following: visualization/dashboard/chart/graph/plot, **interactive** output, **widget**, **calculator**, **sliders**, or **interactive table**,
-  OR provides explicit numeric arrays/series/time points in the conversation context,
-  you MUST generate a NON-EMPTY <WIDGET> (not just empty tags).
-  - For calculators/sliders: a compact interactive calculator widget is acceptable even without a “dataset”.
-  - For plots/charts: include at least one interactive chart (ECharts/Plotly/D3) and optionally a sortable table (Tabulator).
+Understand the user's intent. When the question implies visualization, calculation, comparison, or learning, generate a NON-EMPTY <WIDGET>.
 
-Educational explanations (explain X, how does Y work, e.g. compound interest, ROI, percentages):
-- ALWAYS produce an interactive demo: sliders for parameters (e.g. principal, rate, time) + live formula result + chart showing the concept (e.g. balance over time).
-- Use illustrative/example data — you may choose reasonable default values (e.g. P=1000, r=5%, t=10 years). Label as "Example" if helpful.
-- Do NOT ask for date range or data source first. Produce the interactive app immediately.
+Chart/visual selection — pick the right type for the data and use case:
+| Data / use case | Best widget type | Library |
+|-----------------|------------------|---------|
+| Time-series, trends | Line or area chart | ECharts, Plotly, Chart.js |
+| Categorical comparison | Bar chart (horizontal) | ECharts, Chart.js, ApexCharts |
+| Part of whole | Pie, donut, stacked bar | ECharts, Chart.js |
+| Correlation, x-y | Scatter plot | ECharts, Plotly, D3 |
+| Adjustable numbers, formulas | Interactive calculator with sliders | Plain JS + Chart.js/ECharts |
+| Rows > 8, breakdown | Tabulator table | Tabulator |
+| KPI metrics | KPI tiles + optional chart | CSS + ECharts |
+| Process, flow | Diagram, sankey, funnel | D3, ECharts |
 
-Auto-widget triggers (based on what YOU wrote in <RESPONSE>):
-- If <RESPONSE> includes any numeric values, percentages, currency, or formulas → generate an interactive calculator and/or visualization.
-- If <RESPONSE> includes a list of steps or a comparison → generate an interactive checklist, decision table, or sortable table (Tabulator).
-- If <RESPONSE> includes 5+ numeric points or a time series → generate an interactive chart (ECharts/Plotly/D3).
-- If <RESPONSE> includes only 1–4 numeric points → generate KPI tiles + a small chart if it adds value (no fake data).
-{visual_override_block}
+Libraries: ECharts (cdn.jsdelivr.net/npm/echarts), Plotly (cdn.plot.ly), Chart.js (cdnjs), Tabulator (tabulator.info). Pick what fits.
 
+One chart vs multiple: Use one chart/widget when it suffices. Add more only when each adds distinct value. Never duplicate the same data in multiple chart types.
+
+CRITICAL — Complete the widget: Never truncate or stop mid-generation. The <WIDGET> must be a complete, functional HTML document. If space is tight, shorten <RESPONSE> — the widget must always finish.
 ═══════════════════════════════════════════════════════
 OUTPUT FORMAT — always use exactly this structure
 ═══════════════════════════════════════════════════════
@@ -367,7 +347,9 @@ RESPONSE FORMAT RULE — {response_rule_line}
 Strategy: {strategy_id}
 Rule: {format_rule}
 Do not mention this rule. Do not add <WIDGET> inside <RESPONSE>.
-Important: The chosen Rule applies ONLY inside <RESPONSE>. The <WIDGET> section must follow the WIDGET RULES (not the RESPONSE rule).
+CRITICAL — Primitives vs Widget (never confuse these):
+- The Strategy/Rule above applies ONLY to <RESPONSE> (text format: bullets, table, prose, etc.). It does NOT constrain <WIDGET>.
+- <WIDGET> is SEPARATE and INDEPENDENT. Generate a widget wherever there is possibility, based on content — never skip a widget because the text format is "table" or "prose". Widget choice (chart, calculator, table) depends on content, not on the primitive.
 
 ═══════════════════════════════════════════════════════
 {widget_rules_header}
@@ -382,10 +364,10 @@ Every entity, name, number, ticker, percentage shown in the widget MUST come fro
   - the numeric values you extracted from the user request/context, OR
   - the numeric values present in your <RESPONSE>, OR
   - (for educational/concept demos only) reasonable illustrative values you choose (e.g. P=1000, r=5%, t=10 for compound interest).
-- Never use placeholder names (Item A, Value 1, Example Fund). For concept demos, use meaningful labels (Principal, Rate, Years).
-- If data is missing for a control and it is not an educational demo, omit that control.
-- Verify every chart/table label and every numeric literal used in JS appears in either your <RESPONSE> or the user-provided/context values.
-- Do not create placeholder dates, tickers, or values to make the widget “look full”.
+- Use meaningful labels (Principal, Rate, Years). When using mock data, clearly label it (e.g. "Example", "Mock data").
+- When real data is missing: you MAY use illustrative/mock data; label it clearly in the widget.
+- Prefer data from <RESPONSE> or user context; when unavailable, use mock/illustrative data and label it.
+- When using mock/illustrative data (dates, tickers, values), label it clearly “e.g. Example data, Mock data”.
 
 ═══════════════════════════════════════════════════════
 sendPrompt specificity — always specific, never generic

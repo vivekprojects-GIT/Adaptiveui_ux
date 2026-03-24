@@ -384,6 +384,7 @@ body.hideBaseline .pane.baseline{display:none}
 .msg.a{align-items:flex-start}
 .who{font-size:10px;color:var(--dm);letter-spacing:.08em;text-transform:uppercase;font-weight:600}
 .bub{max-width:82%;padding:14px 17px;border-radius:16px;font-size:15px;line-height:1.75;box-shadow:var(--shadow)}
+.msg.a.has-widget .bub{max-width:98%}
 .msg.u .bub{background:linear-gradient(135deg,#736eff,#615cf6);color:#fff;border-bottom-right-radius:6px}
 .msg.a .bub{background:#fff;border:1px solid var(--bd);border-bottom-left-radius:6px}
 
@@ -495,6 +496,12 @@ body.hideBaseline .pane.baseline{display:none}
 .typ span:nth-child(2){animation-delay:.18s}
 .typ span:nth-child(3){animation-delay:.36s}
 @keyframes bop{0%,60%,100%{transform:translateY(0)}30%{transform:translateY(-6px);background:var(--ac)}}
+
+.msg-status{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--dm);padding:6px 0 8px;min-height:24px}
+.msg-status .st-dot{width:6px;height:6px;border-radius:50%;background:var(--ac);animation:bop 1.1s infinite}
+.msg-status.hidden{display:none}
+.progress-mini{flex:1;max-width:120px;height:4px;background:var(--s3);border-radius:999px;overflow:hidden}
+.progress-mini .pf{height:100%;background:var(--ac);border-radius:999px;transition:width .4s ease}
 
 .errbub{background:rgba(255,94,94,.08);border:1px solid rgba(255,94,94,.3);
   border-radius:10px;padding:10px 14px;font-size:12px;color:var(--r)}
@@ -1170,6 +1177,11 @@ async function send() {
   adaptiveEl.innerHTML = `
     <div class="who">engine</div>
     <div class="bub">
+      <div class="msg-status" id="${mid}_status">
+        <span class="st-dot"></span>
+        <span class="st-txt">Thinking…</span>
+        <div class="progress-mini"><div class="pf" id="${mid}_pf" style="width:0%"></div></div>
+      </div>
       <div class="stream-resp" id="${mid}_resp"></div>
       <div class="widget-mount" id="${mid}_wm"></div>
     </div>
@@ -1238,6 +1250,17 @@ async function send() {
     let buf = '';
     let didFinalize = false;
 
+    let status50Done = false, status80Done = false;
+    const updStatus = (txt, pct) => {
+      const st = document.getElementById(`${mid}_status`);
+      const pf = document.getElementById(`${mid}_pf`);
+      if (st) {
+        const tx = st.querySelector('.st-txt');
+        if (tx) tx.textContent = txt;
+      }
+      if (pf) pf.style.width = (pct || 0) + '%';
+    };
+
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
@@ -1255,6 +1278,7 @@ async function send() {
         if (!evt || !evt.type) continue;
 
         if (evt.type === 'strategy') {
+          updStatus('Writing…', 25);
           setActive(evt.strategy, evt.instruction);
           setInference(evt.scores, evt.posterior, evt.strategy, evt);
           setFeatures(evt.x_vec);
@@ -1272,10 +1296,14 @@ async function send() {
         }
 
         if (evt.type === 'response_delta') {
-          if (respEl) respEl.textContent += String(evt.delta ?? '');
+          if (respEl) {
+            respEl.textContent += String(evt.delta ?? '');
+            if (!status50Done) { status50Done = true; updStatus('Streaming…', 50); }
+          }
         }
 
         if (evt.type === 'widget_delta') {
+          if (!status80Done) { status80Done = true; updStatus('Generating widget…', 80); }
           if (evt.delta && mount.style.display === 'none') {
             mount.style.display = 'block';
             frame.srcdoc = mkWidgetStreamPreviewSrcdoc();
@@ -1285,6 +1313,10 @@ async function send() {
 
         if (evt.type === 'done') {
           didFinalize = true;
+          const stDone = document.getElementById(`${mid}_status`);
+          if (stDone) { stDone.classList.add('hidden'); }
+          const pfDone = document.getElementById(`${mid}_pf`);
+          if (pfDone) pfDone.style.width = '100%';
 
           if (evt.error && respEl) {
             respEl.innerHTML = `<div class="errbub">⚠ ${esc(String(evt.error))}</div>`;
@@ -1309,6 +1341,7 @@ async function send() {
           if (elapsedEl) elapsedEl.textContent = (evt.elapsed !== null && evt.elapsed !== undefined) ? `${evt.elapsed}s` : '—';
 
           if (evt.widget_html && String(evt.widget_html).trim()) {
+            adaptiveEl.classList.add('has-widget');
             mount.style.display = 'block';
             frame.classList.remove('ready');
             frame.style.height = `${Number(evt.widget_height || 420)}px`;
@@ -1414,6 +1447,9 @@ function addAsstBubAdaptive(d) {
     nb = `<span class="notice override">Explicit request → switching to ${to}</span>`;
   }
 
+  if (d.widget_html && typeof d.widget_html === 'string' && d.widget_html.trim()) {
+    el.classList.add('has-widget');
+  }
   el.innerHTML = `
     <div class="who">engine</div>
     <div class="bub">

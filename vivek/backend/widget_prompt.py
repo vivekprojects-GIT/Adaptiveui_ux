@@ -58,12 +58,12 @@ _DESIGN_SYSTEM_CSS = """<style id="__ds__">
   --border:rgba(255,255,255,0.07);--border2:rgba(255,255,255,0.14);
   --accent:#5ba4f5;--accent-bg:rgba(91,164,245,0.10);--accent-b:rgba(91,164,245,0.35);
 }}
-html,body{margin:0!important;padding:12px 14px!important;
+html,body{margin:0!important;padding:12px 14px!important;width:100%;box-sizing:border-box;
   background:transparent!important;color:var(--text);
   font-family:"Segoe UI",system-ui,sans-serif;font-size:14px;line-height:1.6}
 @keyframes __fu{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}
-.widget-root{animation:__fu .22s ease-out}
-.card{background:var(--bg2);border:0.5px solid var(--border);border-radius:var(--radius);padding:14px 16px;margin-bottom:12px;transition:border-color .15s}
+.widget-root{animation:__fu .22s ease-out;width:100%;min-width:100%;box-sizing:border-box}
+.card{background:var(--bg2);border:0.5px solid var(--border);border-radius:var(--radius);padding:14px 16px;margin-bottom:12px;transition:border-color .15s;width:100%;max-width:100%;box-sizing:border-box}
 .card:hover{border-color:var(--border2)}
 .card-title{font-size:11px;font-weight:500;color:var(--text2);text-transform:uppercase;letter-spacing:.05em;margin-bottom:12px}
 .raised{background:var(--bg);border:0.5px solid var(--border);border-radius:var(--radius);padding:14px;transition:border-color .15s,transform .1s;cursor:pointer}
@@ -76,9 +76,9 @@ html,body{margin:0!important;padding:12px 14px!important;
 .tab:active{transform:scale(.985)}
 .tab.active{background:var(--bg3);color:var(--text);border-color:var(--accent)}
 .panel{display:none}.panel.active{display:block}
-table{width:100%;border-collapse:collapse;font-size:13px}
-th{background:var(--bg3);color:var(--text2);font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:.04em;padding:8px 11px;text-align:left;border-bottom:0.5px solid var(--border2)}
-td{padding:8px 11px;border-bottom:0.5px solid var(--border);color:var(--text);vertical-align:middle}
+table{width:100%;min-width:100%;border-collapse:collapse;font-size:14px}
+th{background:var(--bg3);color:var(--text2);font-weight:500;font-size:12px;text-transform:uppercase;letter-spacing:.04em;padding:10px 12px;text-align:left;border-bottom:0.5px solid var(--border2)}
+td{padding:10px 12px;border-bottom:0.5px solid var(--border);color:var(--text);vertical-align:middle;font-size:14px}
 tr:last-child td{border-bottom:none}
 tr.clickable:hover td{background:var(--accent-bg);cursor:pointer}
 .search{width:100%;padding:8px 12px;border-radius:var(--radius-sm);border:0.5px solid var(--border2);background:var(--bg);color:var(--text);font-size:13px;outline:none;box-sizing:border-box;margin-bottom:10px;transition:border-color .15s}
@@ -224,12 +224,14 @@ const gc=dark?'rgba(255,255,255,0.06)':'rgba(0,0,0,0.06)';
 - sendPrompt text must be specific — never generic "tell me more"
 
 ## What not to do
+- No emojis or decorative symbols in labels or UI
 - No hardcoded colors
 - No sendPrompt on slider drag
 - No empty output on first render — always call calc() on load
 - No placeholder or lorem ipsum data — use real content only
 - No position:fixed
-- No external fonts or icon libraries"""
+- No external fonts or icon libraries
+- No decorative clutter — neat, minimal, professional design only"""
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -595,8 +597,8 @@ def estimate_widget_height(html: str) -> int:
     h = html.lower()
     height = 120
     height += h.count('<canvas')                                           * 240
-    height += h.count('<table')                                            * 160
-    height += min(h.count('<tr'), 15)                                      * 36
+    height += h.count('<table')                                            * 180
+    height += min(h.count('<tr'), 20)                                      * 38
     height += (h.count('class="card')  + h.count("class='card"))          * 80
     height += (h.count('class="raised') + h.count("class='raised"))       * 100
     height += min(h.count('<li'), 12)                                      * 30
@@ -607,7 +609,7 @@ def estimate_widget_height(html: str) -> int:
     height += h.count('result-box')                                        * 90
     height += (h.count('class="tab')   + h.count("class='tab"))           * 10
 
-    return max(280, min(height, 920))
+    return max(280, min(height, 1200))
 
 
 def build_local_calc_fallback(user_message: str, assistant_response: str) -> str:
