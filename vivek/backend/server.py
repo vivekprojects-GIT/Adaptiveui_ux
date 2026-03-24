@@ -107,6 +107,11 @@ def _parse_streamed_response(chunks):
         if remaining:
             yield ("response_delta", remaining)
         response_text = buffer
+    elif state == "preamble" and buffer.strip():
+        # Model didn't use XML tags (e.g. "6" for "what is 2*3") - use raw output as response
+        response_text = buffer.strip()
+        if response_text:
+            yield ("response_delta", response_text)
     widget_raw = buffer if state == "widget" else ""
     yield ("complete", response_text, widget_raw)
 
