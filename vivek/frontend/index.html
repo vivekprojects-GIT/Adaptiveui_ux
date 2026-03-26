@@ -1261,20 +1261,27 @@ async function send() {
       if (pf) pf.style.width = (pct || 0) + '%';
     };
 
+    // SSE parsing: events are separated by a blank line. Each event carries one or more `data:` lines.
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
 
       buf += decoder.decode(value, { stream: true });
-      const lines = buf.split('\n');
-      buf = lines.pop() || '';
+      const events = buf.split('\n\n');
+      buf = events.pop() || '';
 
-      for (const line of lines) {
-        const t = line.trim();
-        if (!t) continue;
+      for (const evBlock of events) {
+        const lines = evBlock.split('\n');
+        const dataLines = [];
+        for (const ln of lines) {
+          if (ln.startsWith('data:')) {
+            dataLines.push(ln.slice(5).trimStart());
+          }
+        }
+        if (!dataLines.length) continue;
 
         let evt = null;
-        try { evt = JSON.parse(t); } catch(e) { continue; }
+        try { evt = JSON.parse(dataLines.join('\n')); } catch(e) { continue; }
         if (!evt || !evt.type) continue;
 
         if (evt.type === 'strategy') {

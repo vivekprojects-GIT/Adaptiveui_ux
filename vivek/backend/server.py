@@ -1,3 +1,718 @@
+"""FastAPI server for the Adaptive Presentation Engine backend.
+
+This file replaces the older `http.server` implementation and serves:
+  - GET  /                : frontend (index.html)
+  - GET  /api/health      : LLM connectivity check
+  - GET  /api/state       : Thompson posterior and UI state
+  - POST /api/chat_plain  : baseline chat (no strategy selection)
+  - POST /api/chat        : adaptive chat (non-streaming)
+  - POST /api/chat_stream : adaptive chat (SSE streaming)
+  - POST /api/rate        : feedback update
+  - POST /api/preference : preference update
+  - POST /api/reset       : reset user session
+
+The frontend expects a stream of JSON events with `evt.type` fields:
+  - strategy
+  - response_delta
+  - widget_delta (mostly for openai_compat path)
+  - done
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import time
+from typing import Generator, Tuple
+
+import numpy as np
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from pydantic import BaseModel
+
+from . import config, llm
+from .combined_prompt import (
+    build_combined_system_prompt,
+    build_combined_user_prompt,
+    parse_combined_output,
+)
+from .engine import engine, USERB_ID
+from .utils import (
+    detect_explore_trigger,
+    enforce_response,
+    fast_valence,
+    negative_strength,
+)
+from .widget_prompt import estimate_widget_height, inject_design_system
+
+
+def sse_pack(evt: dict) -> str:
+    """Pack a JSON event into SSE data frame."""
+    return f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
+
+
+def _parse_streamed_response(chunks) -> Generator[Tuple[str, ...], None, None]:
+    """Parse streaming LLM output, yielding ('response_delta', str) + ('complete', response_text, widget_raw)."""
+    buffer = ""
+    state = "preamble"  # preamble | response | widget
+    response_sent_len = 0
+    response_text = ""
+    response_end_tag = "</RESPONSE>"
+    response_start_tag = "<RESPONSE>"
+    widget_start_tag = "<WIDGET>"
+    widget_end_tag = "</WIDGET>"
+    tag_max_len = max(len(response_end_tag), len(widget_end_tag))
+
+    for chunk in chunks:
+        if not chunk:
+            continue
+        buffer += chunk
+        buf_upper = buffer.upper()
+
+        if state == "preamble":
+            if response_start_tag.upper() in buf_upper:
+                idx = buf_upper.find(response_start_tag.upper()) + len(response_start_tag)
+                buffer = buffer[idx:]
+                buf_upper = buffer.upper()
+                state = "response"
+                response_sent_len = 0
+
+        if state == "response":
+            if response_end_tag.upper() in buf_upper:
+                end_idx = buf_upper.find(response_end_tag.upper())
+                to_send = buffer[:end_idx][response_sent_len:]
+                if to_send:
+                    yield ("response_delta", to_send)
+                response_text = buffer[:end_idx].strip()
+                buffer = buffer[end_idx + len(response_end_tag) :]
+                buf_upper = buffer.upper()
+                state = "widget_looking"
+            else:
+                safe_len = max(0, len(buffer) - tag_max_len)
+                if safe_len > response_sent_len:
+                    to_send = buffer[response_sent_len:safe_len]
+                    yield ("response_delta", to_send)
+                    response_sent_len = safe_len
+
+        if state == "widget_looking":
+            if widget_start_tag.upper() in buf_upper:
+                idx = buf_upper.find(widget_start_tag.upper()) + len(widget_start_tag)
+                buffer = buffer[idx:]
+                buf_upper = buffer.upper()
+                state = "widget"
+
+        if state == "widget":
+            if widget_end_tag.upper() in buf_upper:
+                end_idx = buf_upper.find(widget_end_tag.upper())
+                widget_raw = buffer[:end_idx].strip()
+                yield ("complete", response_text, widget_raw)
+                return
+
+    # Stream ended without full parse - yield what we have
+    if state == "response" and buffer:
+        remaining = buffer[response_sent_len:]
+        if remaining:
+            yield ("response_delta", remaining)
+        response_text = buffer
+    elif state == "preamble" and buffer.strip():
+        # Model didn't use XML tags (e.g. returns "6" for "2*3") - treat raw as response.
+        response_text = buffer.strip()
+        if response_text:
+            yield ("response_delta", response_text)
+    widget_raw = buffer if state == "widget" else ""
+    yield ("complete", response_text, widget_raw)
+
+
+def _looks_truncated_widget_html(html: str) -> bool:
+    """Heuristic check for obviously cut-off widget HTML."""
+    if not html:
+        return True
+    lower = html.lower()
+    if lower.count("<style") > lower.count("</style>"):
+        return True
+    if lower.count("<script") > lower.count("</script>"):
+        return True
+    if lower.count("<body") > lower.count("</body>"):
+        return True
+    if lower.count("<html") > lower.count("</html>"):
+        return True
+    if re.search(r"[<{(]$", html.strip()):
+        return True
+    return False
+
+
+class ChatPlainReq(BaseModel):
+    uid: str = "demo"
+    message: str
+
+
+class ChatReq(BaseModel):
+    uid: str = "demo"
+    message: str
+
+
+class RateReq(BaseModel):
+    uid: str = "demo"
+    strategy: str
+    x_vec: list[float]
+    reward: float
+
+
+class PreferenceReq(BaseModel):
+    uid: str = "demo"
+    strategies: list[str] = []
+    lock: bool = False
+
+
+class ResetReq(BaseModel):
+    uid: str = "demo"
+
+
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.get("/", response_class=HTMLResponse)
+def index() -> HTMLResponse:
+    html = config.INDEX_HTML.read_bytes()
+    return HTMLResponse(content=html, media_type="text/html; charset=utf-8")
+
+
+@app.get("/api/health")
+def health():
+    if config.LLM_MODE == "openai_compat":
+        h = llm.openai_health()
+        return {
+            "server": "ok",
+            "mode": config.LLM_MODE,
+            "openai_base_url": config.OPENAI_BASE_URL,
+            "model": config.OPENAI_MODEL,
+            **h,
+        }
+    if config.LLM_MODE == "anthropic":
+        h = llm.anthropic_health()
+        return {"server": "ok", "mode": config.LLM_MODE, **h}
+    return {
+        "server": "ok",
+        "mode": config.LLM_MODE,
+        "ok": False,
+        "reachable": False,
+        "error": "Unsupported LLM_MODE (expected openai_compat or anthropic)",
+    }
+
+
+@app.get("/api/state")
+def state(uid: str = "demo"):
+    x = np.ones(config.D) * 0.5
+    ub = engine.get_user(USERB_ID)
+    return {
+        "posterior": engine.user_posterior(uid, x),
+        "global": engine.global_posterior(x),
+        "userb": engine.posterior_summary(ub["mu"], ub["sigma_inv"], x),
+        "global_n": engine.global_n,
+        "n_users": len(engine.users),
+        "msg_count": engine.get_user(uid)["msg_count"],
+    }
+
+
+@app.post("/api/chat_plain")
+def chat_plain(req: ChatPlainReq):
+    uid = req.uid + "_plain"
+    msg = (req.message or "").strip()
+    if not msg:
+        return JSONResponse({"error": "empty message"}, status_code=400)
+
+    user = engine.get_user(uid)
+    ctx: list[str] = []
+    for t in user["history"][-6:]:
+        ctx += [f"User: {t['user']}", f"Assistant: {t['assistant']}"]
+    ctx.append(f"User: {msg}")
+    prompt = "\n".join(ctx)
+    system = "You are a helpful AI assistant."
+
+    try:
+        base_mode = (config.BASELINE_LLM_MODE or config.LLM_MODE).lower()
+        if base_mode == "openai_compat":
+            response, elapsed, mode = llm.call_openai_compat(prompt, system, timeout=120)
+        elif base_mode == "anthropic":
+            response, elapsed, mode = llm.call_anthropic(prompt, system, timeout=120)
+        else:
+            raise RuntimeError("Unsupported BASELINE_LLM_MODE (expected openai_compat or anthropic)")
+    except Exception as e:
+        return JSONResponse({"error": f"LLM error: {str(e)}"}, status_code=500)
+
+    if not response:
+        return JSONResponse({"error": "LLM returned empty response. Check model/service."}, status_code=500)
+
+    user["history"].append({"user": msg, "assistant": response})
+    user["history"] = user["history"][-20:]
+
+    return {"response": response, "elapsed": elapsed, "llm_mode": mode}
+
+
+def _post_done_payload(
+    *,
+    uid: str,
+    strat: str,
+    prev: str | None,
+    explicit: bool,
+    force_explore: bool,
+    instruction: str,
+    elapsed: float | None,
+    mode: str,
+    scores: dict,
+    x: np.ndarray,
+    auto_detected: bool,
+    auto_r: float | None,
+    ev_reason: str,
+    response: str,
+    widget_html: str,
+    widget_schema: str,
+    widget_height: int,
+    widget_debug: str,
+    raw_preview: str,
+):
+    ub = engine.get_user(USERB_ID)
+    return {
+        "response": response,
+        "strategy": strat,
+        "prev_strategy": prev,
+        "explicit": explicit,
+        "force_explore": force_explore,
+        "instruction": instruction,
+        "elapsed": elapsed,
+        "llm_mode": mode,
+        "scores": {k: round(v, 4) for k, v in scores.items()},
+        "x_vec": x.tolist(),
+        "posterior": engine.user_posterior(uid, x),
+        "global": engine.global_posterior(x),
+        "userb": engine.posterior_summary(ub["mu"], ub["sigma_inv"], x),
+        "global_n": engine.global_n,
+        "auto_detected": auto_detected,
+        "auto_r": auto_r,
+        "auto_reason": ev_reason,
+        "widget_html": widget_html or "",
+        "widget_schema": widget_schema or "",
+        "widget_height": widget_height,
+        "widget_debug": widget_debug,
+        "widget_raw_preview": raw_preview if not (widget_html or widget_schema) else "",
+    }
+
+
+@app.post("/api/chat")
+def chat(req: ChatReq):
+    uid = req.uid
+    msg = (req.message or "").strip()
+    if not msg:
+        return JSONResponse({"error": "empty message"}, status_code=400)
+
+    user = engine.get_user(uid)
+
+    ev = fast_valence(msg, user["last_response"])
+    auto_detected = False
+    auto_r = None
+
+    if user["last_response"] and user["last_x"] is not None and user["last_strategy"]:
+        reward = float(np.clip(0.5 + 0.45 * ev["pos"] - 0.45 * ev["neg"], 0.05, 0.95))
+        engine.update(uid, user["last_strategy"], np.array(user["last_x"]), reward)
+        auto_detected = True
+        auto_r = reward
+
+    explicit = False
+    force_explore = bool(detect_explore_trigger(msg) or (ev.get("neg", 0.0) >= config.NEG_EXPLORE_THRESHOLD))
+    neg_s = negative_strength(ev)
+
+    strat, scores, x, prev = engine.select(
+        uid, msg, force_explore=force_explore, neg_strength=neg_s, explicit_strategy=None
+    )
+
+    format_rule = config.STRATEGIES.get(strat, "Be helpful and clear.")
+    combined_max_tokens = getattr(config, "COMBINED_MAX_TOKENS", 2800)
+    combined_timeout = getattr(config, "COMBINED_TIMEOUT_SECONDS", 30)
+
+    combined_system = build_combined_system_prompt(
+        strategy_id=strat,
+        format_rule=format_rule,
+        primitive_extra_context=getattr(config, "SKILLS_CONTENT", "") or "",
+        user_message=msg,
+        forbidden_components=None,
+        required_components=None,
+    )
+    combined_prompt = build_combined_user_prompt(user_message=msg, history=user["history"])
+
+    t0 = time.time()
+    try:
+        adapt_mode = (config.ADAPTIVE_LLM_MODE or config.LLM_MODE).lower()
+        if adapt_mode == "openai_compat":
+            raw_combined, elapsed, mode = llm.call_openai_compat(
+                combined_prompt, combined_system, timeout=combined_timeout, max_tokens=combined_max_tokens, temperature=0.2
+            )
+        elif adapt_mode == "anthropic":
+            raw_combined, elapsed, mode = llm.call_anthropic(
+                combined_prompt, combined_system, timeout=combined_timeout, max_tokens=combined_max_tokens, temperature=0.2
+            )
+        else:
+            raise RuntimeError("Unsupported ADAPTIVE_LLM_MODE (expected openai_compat or anthropic)")
+    except Exception as e:
+        return JSONResponse({"error": f"LLM error: {str(e)}"}, status_code=500)
+
+    if not raw_combined:
+        return JSONResponse({"error": "LLM returned empty response. Check model/service."}, status_code=500)
+
+    response, widget_payload_raw = parse_combined_output(raw_combined)
+    if not response:
+        response = raw_combined.strip()
+    if config.STRICT_PRIMITIVES:
+        response = enforce_response(strat, response)
+
+    widget_html = ""
+    widget_schema = ""
+    widget_height = 0
+    widget_debug = ""
+    widget_mode = getattr(config, "WIDGET_MODE", "json").strip().lower()
+    raw_preview = ""
+
+    if widget_payload_raw:
+        if widget_mode == "json":
+            widget_schema = widget_payload_raw
+            widget_debug = widget_debug or "combined_schema_ok"
+        else:
+            if _looks_truncated_widget_html(widget_payload_raw):
+                widget_debug = "combined_widget_truncated"
+            else:
+                widget_html = widget_payload_raw
+                widget_height = estimate_widget_height(widget_payload_raw)
+                widget_debug = widget_debug or "combined_widget_ok"
+    else:
+        widget_debug = widget_debug or ("combined_no_schema" if widget_mode == "json" else "combined_no_widget_tag")
+        raw_preview = (raw_combined or "")[:800]
+        if widget_mode != "json":
+            placeholder = "<html><head></head><body><div class='widget-root card'><div class='card-title'>Interactive widget</div><div class='empty'>No widget returned.</div></div></body></html>"
+            widget_html = inject_design_system(placeholder)
+            widget_height = estimate_widget_height(widget_html)
+            widget_debug = "fallback_widget_generated"
+
+    # Update history
+    user["history"].append({"user": msg, "assistant": response})
+    user["history"] = user["history"][-20:]
+    user["last_message"] = msg
+    user["last_response"] = response
+    user["last_strategy"] = strat
+    user["last_x"] = x.tolist()
+    user["msg_count"] += 1
+
+    payload = _post_done_payload(
+        uid=uid,
+        strat=strat,
+        prev=prev,
+        explicit=explicit,
+        force_explore=force_explore and (explicit is None),
+        instruction=config.STRATEGIES[strat],
+        elapsed=elapsed,
+        mode=mode,
+        scores=scores,
+        x=x,
+        auto_detected=auto_detected,
+        auto_r=auto_r,
+        ev_reason=ev["reason"],
+        response=response,
+        widget_html=widget_html,
+        widget_schema=widget_schema,
+        widget_height=widget_height,
+        widget_debug=widget_debug,
+        raw_preview=raw_preview,
+    )
+    return payload
+
+
+@app.post("/api/chat_stream")
+def chat_stream(req: ChatReq):
+    uid = req.uid
+    msg = (req.message or "").strip()
+    if not msg:
+        return JSONResponse({"error": "empty message"}, status_code=400)
+
+    user = engine.get_user(uid)
+
+    ev = fast_valence(msg, user["last_response"])
+    auto_detected = False
+    auto_r = None
+
+    if user["last_response"] and user["last_x"] is not None and user["last_strategy"]:
+        reward = float(np.clip(0.5 + 0.45 * ev["pos"] - 0.45 * ev["neg"], 0.05, 0.95))
+        engine.update(uid, user["last_strategy"], np.array(user["last_x"]), reward)
+        auto_detected = True
+        auto_r = reward
+
+    explicit = False
+    force_explore = bool(detect_explore_trigger(msg) or (ev.get("neg", 0.0) >= config.NEG_EXPLORE_THRESHOLD))
+    neg_s = negative_strength(ev)
+
+    strat, scores, x, prev = engine.select(
+        uid, msg, force_explore=force_explore, neg_strength=neg_s, explicit_strategy=None
+    )
+
+    format_rule = config.STRATEGIES.get(strat, "Be helpful and clear.")
+    combined_max_tokens = getattr(config, "COMBINED_MAX_TOKENS", 2800)
+    combined_timeout = getattr(config, "COMBINED_TIMEOUT_SECONDS", 30)
+
+    combined_system = build_combined_system_prompt(
+        strategy_id=strat,
+        format_rule=format_rule,
+        primitive_extra_context=getattr(config, "SKILLS_CONTENT", "") or "",
+        user_message=msg,
+        forbidden_components=None,
+        required_components=None,
+    )
+    combined_prompt = build_combined_user_prompt(user_message=msg, history=user["history"])
+
+    adapt_mode = (config.ADAPTIVE_LLM_MODE or config.LLM_MODE).lower()
+
+    ub = engine.get_user(USERB_ID)
+
+    def gen():
+        t0 = time.time()
+        # Initial strategy event
+        yield sse_pack(
+            {
+                "type": "strategy",
+                "strategy": strat,
+                "instruction": config.STRATEGIES[strat],
+                "elapsed": None,
+                "force_explore": force_explore,
+                "scores": {k: round(v, 4) for k, v in scores.items()},
+                "x_vec": x.tolist(),
+                "posterior": engine.user_posterior(uid, x),
+                "global": engine.global_posterior(x),
+                "userb": engine.posterior_summary(ub["mu"], ub["sigma_inv"], x),
+                "global_n": engine.global_n,
+                "prev_strategy": prev,
+                "explicit": explicit,
+                "auto_detected": auto_detected,
+                "auto_r": auto_r,
+                "auto_reason": ev["reason"],
+            }
+        )
+
+        widget_html = ""
+        widget_schema = ""
+        widget_height = 0
+        widget_debug = ""
+        widget_mode = getattr(config, "WIDGET_MODE", "json").strip().lower()
+        raw_preview = ""
+        response = ""
+        mode = adapt_mode
+
+        try:
+            if adapt_mode == "openai_compat":
+                raw_combined, elapsed, mode = llm.call_openai_compat(
+                    combined_prompt, combined_system, timeout=combined_timeout, max_tokens=combined_max_tokens, temperature=0.2
+                )
+                response, widget_payload_raw = parse_combined_output(raw_combined)
+                if not response:
+                    response = raw_combined.strip()
+                if config.STRICT_PRIMITIVES:
+                    response = enforce_response(strat, response)
+
+                if widget_payload_raw:
+                    if widget_mode == "json":
+                        widget_schema = widget_payload_raw
+                        widget_debug = "combined_schema_ok"
+                    else:
+                        if _looks_truncated_widget_html(widget_payload_raw):
+                            widget_debug = "combined_widget_truncated"
+                        else:
+                            widget_html = widget_payload_raw
+                            widget_height = estimate_widget_height(widget_html)
+                            widget_debug = "combined_widget_ok"
+                else:
+                    widget_debug = "combined_no_widget_tag" if widget_mode != "json" else "combined_no_schema"
+                    raw_preview = (raw_combined or "")[:800]
+                    if widget_mode != "json":
+                        placeholder = "<html><head></head><body><div class='widget-root card'><div class='card-title'>Interactive widget</div><div class='empty'>No widget returned.</div></div></body></html>"
+                        widget_html = inject_design_system(placeholder)
+                        widget_height = estimate_widget_height(widget_html)
+                        widget_debug = "fallback_widget_generated"
+
+                # Stream response deltas + widget deltas (to keep UI progress behavior)
+                for i in range(0, len(response), 180):
+                    yield sse_pack({"type": "response_delta", "delta": response[i : i + 180]})
+                payload = widget_schema if (widget_mode == "json" and widget_schema) else widget_html
+                if payload:
+                    for i in range(0, len(payload), 900):
+                        yield sse_pack({"type": "widget_delta", "delta": payload[i : i + 900]})
+
+                elapsed_out = elapsed
+
+            elif adapt_mode == "anthropic":
+                stream = llm.stream_anthropic(
+                    combined_prompt, combined_system, timeout=combined_timeout, max_tokens=combined_max_tokens, temperature=0.2
+                )
+                response = ""
+                widget_payload_raw = ""
+                for event_type, *args in _parse_streamed_response(stream):
+                    if event_type == "response_delta":
+                        yield sse_pack({"type": "response_delta", "delta": args[0]})
+                    elif event_type == "complete":
+                        response, widget_payload_raw = args[0], args[1]
+                        break
+                elapsed_out = round(time.time() - t0, 1)
+                mode = "anthropic"
+
+                if not response and not widget_payload_raw:
+                    response = "(No content)"
+                if config.STRICT_PRIMITIVES and response:
+                    response = enforce_response(strat, response)
+
+                if widget_payload_raw:
+                    if widget_mode == "json":
+                        widget_schema = widget_payload_raw
+                    else:
+                        raw_widget = widget_payload_raw
+                        if "```" in raw_widget:
+                            fence = re.search(r"```(?:json|html)?\\s*(.*?)```", raw_widget, re.DOTALL | re.IGNORECASE)
+                            raw_widget = fence.group(1).strip() if fence else re.sub(r"```\w*", "", raw_widget).strip()
+                        if "<" in raw_widget and ">" in raw_widget:
+                            if "<html" not in raw_widget.lower():
+                                raw_widget = f"<html><head></head><body>{raw_widget}</body></html>"
+                            raw_widget = re.sub(r"<!DOCTYPE[^>]*>", "", raw_widget, flags=re.IGNORECASE).strip()
+                            widget_payload_raw = inject_design_system(raw_widget)
+                            if _looks_truncated_widget_html(widget_payload_raw):
+                                widget_debug = "stream_widget_truncated"
+                            else:
+                                widget_html = widget_payload_raw
+                                widget_height = estimate_widget_height(widget_html)
+                if widget_mode != "json" and not widget_html:
+                    widget_debug = "no_widget"
+
+            else:
+                raise RuntimeError("Unsupported ADAPTIVE_LLM_MODE (expected openai_compat or anthropic)")
+
+        except Exception as e:
+            msg_err = str(e).strip() or repr(e)
+            yield sse_pack(
+                {
+                    "type": "done",
+                    "strategy": strat,
+                    "elapsed": None,
+                    "llm_mode": mode,
+                    "response": "",
+                    "widget_html": "",
+                    "widget_schema": "",
+                    "widget_height": 0,
+                    "widget_debug": f"stream_error:{msg_err}",
+                    "error": msg_err,
+                    "force_explore": force_explore,
+                    "scores": {k: round(v, 4) for k, v in scores.items()},
+                    "x_vec": x.tolist(),
+                    "posterior": engine.user_posterior(uid, x),
+                    "global": engine.global_posterior(x),
+                    "userb": engine.posterior_summary(ub["mu"], ub["sigma_inv"], x),
+                    "global_n": engine.global_n,
+                    "prev_strategy": prev,
+                    "explicit": explicit,
+                    "auto_detected": auto_detected,
+                    "auto_r": auto_r,
+                    "auto_reason": ev["reason"],
+                }
+            )
+            return
+
+        # Update history
+        user["history"].append({"user": msg, "assistant": response})
+        user["history"] = user["history"][-20:]
+        user["last_message"] = msg
+        user["last_response"] = response
+        user["last_strategy"] = strat
+        user["last_x"] = x.tolist()
+        user["msg_count"] += 1
+
+        yield sse_pack(
+            {
+                "type": "done",
+                "strategy": strat,
+                "elapsed": elapsed_out,
+                "llm_mode": mode,
+                "response": response,
+                "widget_html": widget_html or "",
+                "widget_schema": widget_schema or "",
+                "widget_height": widget_height,
+                "widget_debug": widget_debug,
+                "force_explore": force_explore and (explicit is None),
+                "scores": {k: round(v, 4) for k, v in scores.items()},
+                "x_vec": x.tolist(),
+                "posterior": engine.user_posterior(uid, x),
+                "global": engine.global_posterior(x),
+                "userb": engine.posterior_summary(ub["mu"], ub["sigma_inv"], x),
+                "global_n": engine.global_n,
+                "prev_strategy": prev,
+                "explicit": explicit,
+                "auto_detected": auto_detected,
+                "auto_r": auto_r,
+                "auto_reason": ev["reason"],
+            }
+        )
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+@app.post("/api/rate")
+def rate(req: RateReq):
+    uid = req.uid
+    strategy = req.strategy
+    x = np.array(req.x_vec, dtype=float)
+    reward = float(req.reward)
+    if strategy not in config.STRATEGY_NAMES:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    engine.update(uid, strategy, x, reward)
+    ub = engine.get_user(USERB_ID)
+    return {
+        "posterior": engine.user_posterior(uid, x),
+        "global": engine.global_posterior(x),
+        "userb": engine.posterior_summary(ub["mu"], ub["sigma_inv"], x),
+        "global_n": engine.global_n,
+    }
+
+
+@app.post("/api/preference")
+def preference(req: PreferenceReq):
+    uid = req.uid
+    engine.apply_preferences(uid, req.strategies, lock=bool(req.lock))
+    return {"posterior": engine.user_posterior(uid)}
+
+
+@app.post("/api/reset")
+def reset(req: ResetReq):
+    engine.reset_user(req.uid)
+    return {"ok": True}
+
+
+def run_server():
+    """Run with uvicorn (production-ready)."""
+    import uvicorn
+
+    port = int(os.getenv("PORT", "5051"))
+    print("=" * 60)
+    print(f"  http://localhost:{port}   mode: {config.LLM_MODE}")
+    print("=" * 60)
+    uvicorn.run(app, host="0.0.0.0", port=port)
+
 """HTTP server and request handlers for the Adaptive Presentation Engine backend.
 
 Serves:
