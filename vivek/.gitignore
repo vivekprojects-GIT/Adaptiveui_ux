@@ -28,5 +28,5 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# Local DB (HF Hub rejects binary sqlite in git push)
-*.sqlite3
+# adaptiveui.sqlite3 is tracked for GitHub (demo_vivek). Do not push that branch to
+# Hugging Face origin — their hook rejects binary sqlite in git.
