@@ -52,6 +52,10 @@ const showBaseline = ref(true)
 const showTechPanels = ref(true)
 const prefOpen = ref(false)
 
+function closeTechPanels() {
+  showTechPanels.value = false
+}
+
 const baselineScrollEl = ref<HTMLDivElement | null>(null)
 const adaptiveScrollEl = ref<HTMLDivElement | null>(null)
 const baselineStickToBottom = ref(true)
@@ -61,6 +65,10 @@ const widgetGenerating = ref(false)
 const widgetGeneratingIdx = ref<number | null>(null)
 
 let healthTimer: ReturnType<typeof setInterval> | null = null
+
+function onGlobalKeydown(e: KeyboardEvent) {
+  if (e.key === 'Escape' && showTechPanels.value) closeTechPanels()
+}
 
 function readBaselineStorage() {
   try {
@@ -551,11 +559,14 @@ onMounted(async () => {
   fetchState()
   fetchHealth()
   healthTimer = setInterval(fetchHealth, 30000)
+
+  window.addEventListener('keydown', onGlobalKeydown)
 })
 
 onUnmounted(() => {
   if (healthTimer) clearInterval(healthTimer)
   killAnimationsOf(streamPulseEl.value)
+  window.removeEventListener('keydown', onGlobalKeydown)
 })
 
 watch(
@@ -847,6 +858,59 @@ function onAdaptiveScroll() {
           </div>
         </div>
       </aside>
+
+      <!-- Mobile/tablet insights drawer (shown below xl). -->
+      <Teleport to="body">
+        <Transition
+          enter-active-class="transition-opacity duration-200 ease-out"
+          enter-from-class="opacity-0"
+          enter-to-class="opacity-100"
+          leave-active-class="transition-opacity duration-150 ease-in"
+          leave-from-class="opacity-100"
+          leave-to-class="opacity-0"
+        >
+          <div
+            v-if="showTechPanels"
+            class="xl:hidden fixed inset-0 z-[250] bg-black/45 backdrop-blur-sm"
+            @click="closeTechPanels"
+          />
+        </Transition>
+
+        <Transition
+          enter-active-class="transition-transform duration-250 ease-out"
+          enter-from-class="translate-x-full"
+          enter-to-class="translate-x-0"
+          leave-active-class="transition-transform duration-200 ease-in"
+          leave-from-class="translate-x-0"
+          leave-to-class="translate-x-full"
+        >
+          <div v-if="showTechPanels" class="xl:hidden fixed inset-y-0 right-0 z-[260] w-[92vw] max-w-[440px]">
+            <div class="h-full bg-background border-l shadow-2xl flex flex-col" @click.stop>
+              <div class="px-4 py-3 border-b flex items-center justify-between">
+                <div class="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Insights</div>
+                <Button type="button" variant="outline" class="h-9 text-xs" @click="closeTechPanels">Close</Button>
+              </div>
+              <div class="p-3 overflow-y-auto min-h-0">
+                <div class="rounded-2xl border bg-card/60 backdrop-blur p-3 shadow-sm">
+                  <TechPanels
+                    :active-strategy="banditState.activeStrategy"
+                    :active-instruction="banditState.activeInstruction"
+                    :selected-strategy="banditState.selectedStrategy"
+                    :user-posterior="banditState.userPosterior"
+                    :global-posterior="banditState.globalPosterior"
+                    :user-b-posterior="banditState.userBPosterior"
+                    :global-n="banditState.globalN"
+                    :n-users="banditState.nUsers"
+                    :scores="banditState.scores"
+                    :x-vec="banditState.lastXVec"
+                    :reward-log="banditState.rewardLog"
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+        </Transition>
+      </Teleport>
     </div>
 
     <form class="chat-input-shell flex gap-2 items-end shrink-0 pb-1 pt-2" @submit.prevent="onSend">
