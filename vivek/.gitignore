@@ -27,3 +27,6 @@ htmlcov/
 # OS Specific
 .DS_Store
 Thumbs.db
+
+# Local DB (HF Hub rejects binary sqlite in git push)
+*.sqlite3

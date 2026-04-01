@@ -3,3 +3,6 @@ python-dotenv
 anthropic
 fastapi
 uvicorn[standard]
+SQLAlchemy
+PyJWT
+bcrypt

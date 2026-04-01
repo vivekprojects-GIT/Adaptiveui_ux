@@ -98,22 +98,19 @@ Forbidden (never include):
 
 _OUTPUT_CONTRACT_STRICT = """
 OUTPUT CONTRACT (STRICT — MUST FOLLOW)
-You MUST return EXACTLY two sections, in this exact order:
+You MUST return these sections in this exact order:
 
 <RESPONSE>
 ...text...
 </RESPONSE>
 <WIDGET>
-...widget...
+...widget OR empty...
 </WIDGET>
 
 Rules:
-- NEVER omit <WIDGET>.
-- NEVER return only text.
-- If you are uncertain or missing data, STILL return a valid widget that:
-  - clearly labels any values as approximate, and
-  - includes controls + a chart (ECharts, Plotly, D3, or other) driven by embedded (approximate) data, and
-  - includes one or more sendPrompt() buttons asking the user for the missing data (e.g., date range / source).
+- Never omit the <WIDGET> tags, but content may be empty when a widget is not warranted.
+- If widget is warranted, return a valid interactive widget (not placeholders).
+- If widget is not warranted (simple chit-chat / conceptual text-only), return exactly <WIDGET></WIDGET>.
 If you fail to follow this contract, the system will break.
 """
 
@@ -200,6 +197,7 @@ def build_combined_system_prompt(
     format_rule: str,
     primitive_extra_context: str,
     user_message: str,
+    widget_required: bool = True,
     forbidden_components: list[str] | None = None,
     required_components: list[str] | None = None,
 ) -> str:
@@ -256,11 +254,17 @@ def build_combined_system_prompt(
         else "WIDGET RULES — for the JSON schema inside <WIDGET>"
     )
 
+    widget_requirement_block = (
+        "WIDGET REQUIRED for this user turn: return a NON-EMPTY widget."
+        if widget_required
+        else "WIDGET OPTIONAL for this user turn: return <WIDGET></WIDGET> if the turn is better as text-only."
+    )
+
     widget_rules_body = (
         f"""- Hard output contract (never violate):
   - You MUST output BOTH tags exactly once: <RESPONSE>...</RESPONSE> and <WIDGET>...</WIDGET>.
-  - Never omit <WIDGET> tags. If you choose “no widget”, output literally `<WIDGET></WIDGET>` (empty but present).
-- Generate widget content wherever there is possibility. Use data from text when available; use mock/illustrative data when not, and label it. The <WIDGET> tags are REQUIRED.
+  - Never omit <WIDGET> tags. For text-only turns, output `<WIDGET></WIDGET>`.
+- {widget_requirement_block}
 - Choose the UI based on the content in <RESPONSE> (data-driven). Do not follow any fixed template.
 - IMPORTANT: In HTML mode, the content inside <WIDGET> MUST be HTML (not JSON). It must contain opening <html> and closing </html>.
 - Return a COMPLETE, self-contained HTML document (opening <html> to closing </html>).
@@ -302,15 +306,22 @@ Output style: No emojis. Neat, clean, professional — in both <RESPONSE> text a
 {token_limit_block}
 {_OUTPUT_CONTRACT_STRICT}
 
-For every response you produce TWO sections — response text and an interactive widget — in one generation.
-Default behavior: generate a NON-EMPTY <WIDGET> that turns your own <RESPONSE> into something interactive/visual.
+For every response you produce TWO sections in one generation.
+The widget block may be empty for text-only turns where interactivity is not helpful.
 
 CRITICAL — Never describe a widget you do not generate. If your <RESPONSE> mentions "the dashboard below", "interactive chart", "explore visually", or anything that implies a visualization exists, you MUST output a complete, non-empty <WIDGET>. Do NOT say "the dashboard below" if you return empty <WIDGET></WIDGET>. Either generate the full widget HTML or do not mention it in the text at all.
 
-Only return an EMPTY widget block (<WIDGET></WIDGET>) when the turn is truly not “widget-worthy”:
-- greetings (hi, hello, hey), acknowledgements (thanks, ok, got it), or pure chit-chat with no substance
+Only return an EMPTY widget block (<WIDGET></WIDGET>) when the turn is not “widget-worthy”:
+- greetings (hi, hello, hey), acknowledgements (thanks, ok, got it), pure chit-chat
+- conceptual Q&A with no dataset/comparison/actionable metrics
+- planning/roadmap/implementation-step requests where prose is the primary output
 
-Our goal: create a widget wherever possible. Infer from the user's question and your <RESPONSE> content whether a widget would help. If your <RESPONSE> has structure, numbers, concepts, or comparisons that would benefit from something interactive, generate the best-fit widget.
+Infer from the user's question and your <RESPONSE> content whether a widget would help. If your <RESPONSE> has structure, numbers, comparisons, or decision support, generate the best-fit widget.
+
+Widget warrant decision checklist:
+- Generate NON-EMPTY widget if the user asks for charts, dashboard, analytics, comparison, trends, KPIs, forecasting, ranking, tabular breakdown, or numeric exploration.
+- Generate NON-EMPTY widget if your response includes measurable values that benefit from visual or interactive interpretation.
+- Return EMPTY widget for pure explanation/definition/planning where a chart would be decorative noise.
 
 Understand the user's intent. When the question implies visualization, calculation, comparison, or learning, generate a NON-EMPTY <WIDGET>.
 

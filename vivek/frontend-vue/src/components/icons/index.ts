@@ -1,0 +1,16 @@
+export {
+  Bars3Icon,
+  ArrowLeftIcon,
+  ArrowRightIcon,
+  ArrowPathIcon,
+  Cog6ToothIcon,
+  ChartBarIcon,
+  ChatBubbleLeftRightIcon,
+  PuzzlePieceIcon,
+  SparklesIcon,
+  RocketLaunchIcon,
+  InformationCircleIcon,
+  ArrowRightOnRectangleIcon,
+  EyeIcon,
+  EyeSlashIcon,
+} from '@heroicons/vue/24/outline'

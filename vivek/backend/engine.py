@@ -19,15 +19,69 @@ from .utils import sigmoid, mean_uncertainty
 
 class BayesianEngine:
     def __init__(self):
-        self.global_mu   = {k: np.zeros(config.D)      for k in config.STRATEGY_NAMES}
-        self.global_sinv = {k: np.eye(config.D) * 0.1  for k in config.STRATEGY_NAMES}
+        # Keep posterior state for all known strategies (enabled + disabled).
+        # Selection/visualization should still use `config.STRATEGY_NAMES` (enabled only).
+        initial_ids = set(getattr(config, "STRATEGY_ITEMS", {}) or {}).union(set(config.STRATEGY_NAMES))
+        self.global_mu = {k: np.zeros(config.D) for k in initial_ids}
+        self.global_sinv = {k: np.eye(config.D) * 0.1 for k in initial_ids}
         self.users = {}
         self.global_n = 0
 
+    def _all_strategy_ids(self) -> set[str]:
+        items = getattr(config, "STRATEGY_ITEMS", {}) or {}
+        return set(items.keys()) if items else set(config.STRATEGY_NAMES)
+
+    def reconcile_strategies(self) -> None:
+        """
+        Reconcile engine posterior dictionaries with the current strategy store.
+
+        - If new strategies appear: add priors (zero mean, low precision identity).
+        - If strategies are hard-deleted: remove their posterior state.
+        - If strategies are disabled: keep state but they won't be selected/visualized
+          because selection/summary loops use `config.STRATEGY_NAMES`.
+        """
+        desired_ids = self._all_strategy_ids()
+
+        # Add missing strategy keys.
+        for sid in desired_ids:
+            if sid not in self.global_mu:
+                self.global_mu[sid] = np.zeros(config.D)
+                self.global_sinv[sid] = np.eye(config.D) * 0.1
+
+        # Remove hard-deleted strategies.
+        current_ids = set(self.global_mu.keys())
+        to_remove = current_ids - desired_ids
+        for sid in to_remove:
+            self.global_mu.pop(sid, None)
+            self.global_sinv.pop(sid, None)
+            for user in self.users.values():
+                user.get("mu", {}).pop(sid, None)
+                user.get("sigma_inv", {}).pop(sid, None)
+                prefs = user.get("prefs")
+                if isinstance(prefs, set) and sid in prefs:
+                    prefs.discard(sid)
+                if user.get("locked_strategy") == sid:
+                    user["locked_strategy"] = None
+                if user.get("pending_strategy") == sid:
+                    user["pending_strategy"] = None
+
+        # Ensure all existing users have keys for every known strategy.
+        for user in self.users.values():
+            mu = user.get("mu") or {}
+            sinv = user.get("sigma_inv") or {}
+            for sid in desired_ids:
+                if sid not in mu:
+                    mu[sid] = self.global_mu[sid].copy()
+                if sid not in sinv:
+                    sinv[sid] = self.global_sinv[sid].copy()
+            user["mu"] = mu
+            user["sigma_inv"] = sinv
+
     def _new_user(self):
+        all_ids = self._all_strategy_ids()
         return {
-            "mu":            {k: self.global_mu[k].copy()   for k in config.STRATEGY_NAMES},
-            "sigma_inv":     {k: self.global_sinv[k].copy() for k in config.STRATEGY_NAMES},
+            "mu":            {k: self.global_mu[k].copy()   for k in all_ids},
+            "sigma_inv":     {k: self.global_sinv[k].copy() for k in all_ids},
             "history":       [],
             "reward_log":    [],
             "last_message":  "",
@@ -56,7 +110,12 @@ class BayesianEngine:
         rl      = user["reward_log"]
         avg_r   = sum(r for _, r in rl[-5:]) / max(len(rl[-5:]), 1) if rl else 0.5
         msg_num = min(user["msg_count"] / 20.0, 1.0)
-        si      = config.STRATEGY_NAMES.index(user["last_strategy"]) / (config.K-1) if user["last_strategy"] else 0.5
+        # Map last strategy into [0,1] by its rank among enabled strategies.
+        # If the strategy is currently disabled, fall back to 0.5.
+        if user.get("last_strategy") and user["last_strategy"] in config.STRATEGY_NAMES and config.K > 1:
+            si = config.STRATEGY_NAMES.index(user["last_strategy"]) / (config.K - 1)
+        else:
+            si = 0.5
         trend   = 0.0
         if len(rl) >= 3:
             ys = [r for _, r in rl[-5:]]
@@ -71,7 +130,7 @@ class BayesianEngine:
 
     def _damp_posterior(self, user: dict, strategy: str, strength: float):
         """Option B: reduce confidence in the last chosen strategy."""
-        if strategy not in config.STRATEGY_NAMES:
+        if strategy not in user.get("mu", {}):
             return
         s = float(np.clip(strength, 0.0, 1.0))
         if s <= 0:
@@ -96,7 +155,7 @@ class BayesianEngine:
         # One-time override: honor the upfront user-selected format once,
         # then return to adaptive Thompson Sampling on later turns.
         pending = user.get("pending_strategy")
-        if pending in config.STRATEGY_NAMES:
+        if pending in self.global_mu:
             user["pending_strategy"] = None
             return pending, {k: 0.0 for k in config.STRATEGY_NAMES}, x, prev
 
@@ -104,7 +163,7 @@ class BayesianEngine:
         # Hard-lock disables exploration, but should NOT block an explicit request like
         # "compare X vs Y" or "put it in a table".
         locked = user.get("locked_strategy")
-        if locked in config.STRATEGY_NAMES:
+        if locked in self.global_mu:
             force_explore = False
             if explicit_strategy is None:
                 explicit_strategy = locked
@@ -136,7 +195,7 @@ class BayesianEngine:
         # previously hard-locked a default style. The lock only disables exploration.
         if explicit_strategy in config.STRATEGY_NAMES:
             chosen = explicit_strategy
-        elif locked in config.STRATEGY_NAMES:
+        elif locked in self.global_mu and locked in config.STRATEGY_NAMES:
             chosen = locked
         else:
             chosen = max(scores, key=scores.get)
@@ -145,6 +204,9 @@ class BayesianEngine:
 
     def update(self, uid: str, strategy: str, x: np.ndarray, reward: float):
         user   = self.get_user(uid)
+        if strategy not in user.get("mu", {}) or strategy not in user.get("sigma_inv", {}):
+            # Strategy might have been hard-deleted after selection; ignore update safely.
+            return
         mu_old = user["mu"][strategy]
         si_old = user["sigma_inv"][strategy]
         r_hat  = sigmoid(float(x @ mu_old))

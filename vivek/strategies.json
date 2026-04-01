@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "id": "structured_bullets",
+      "label": "Structured Bullets",
+      "instruction": "Use 3-5 bullet points only (start each line with '- '). No intro sentence. Do NOT ask questions. Do NOT use numbered lists.",
+      "enabled": true
+    },
+    {
+      "id": "narrative_prose",
+      "label": "Narrative Prose",
+      "instruction": "Write 2-3 short paragraphs. No bullet points.",
+      "enabled": true
+    },
+    {
+      "id": "concise_direct",
+      "label": "Concise & Direct",
+      "instruction": "Reply in at most 3 sentences. Be direct.",
+      "enabled": true
+    },
+    {
+      "id": "socratic_questions",
+      "label": "Socratic Questions",
+      "instruction": "Brief acknowledgement, then ask 1-2 clarifying questions.",
+      "enabled": true
+    },
+    {
+      "id": "step_by_step",
+      "label": "Step-by-Step",
+      "instruction": "Numbered list of 3-6 steps only.",
+      "enabled": true
+    },
+    {
+      "id": "comparison_table",
+      "label": "Comparison Table",
+      "instruction": "Return a single MARKDOWN TABLE only. Use columns that help compare options (e.g., Option | Pros | Cons | Best for). No bullets outside the table.",
+      "enabled": true
+    },
+    {
+      "id": "visualization",
+      "label": "Visualization",
+      "instruction": "Return a simple TEXT visualization only (ASCII bar chart or small table-of-values). Put it in a fenced code block. No extra prose outside the code block.",
+      "enabled": true
+    },
+    {
+      "id": "summary_",
+      "label": "summary",
+      "instruction": "explain in one paragraph",
+      "enabled": true
+    }
+  ]
+}

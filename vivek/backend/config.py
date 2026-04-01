@@ -7,7 +7,9 @@ Restart the server after changing .env.
 
 from pathlib import Path
 from dotenv import load_dotenv
+import json
 import os
+import threading
 
 # Load .env into os.environ; override=True lets existing env vars win (Docker/CI).
 load_dotenv(override=True)
@@ -67,7 +69,9 @@ NEG_MU_SHRINK = float(os.getenv("NEG_MU_SHRINK", "0.25"))
 NEG_SINV_SHRINK = float(os.getenv("NEG_SINV_SHRINK", "0.35"))
 
 # Strategy primitives: style constraints injected into LLM prompts.
-STRATEGIES = {
+# These are bootstrapped defaults. At runtime we may override them from
+# `strategies.json` to make the bandit "strategy bars" admin-manageable.
+DEFAULT_STRATEGIES = {
     "structured_bullets": "Use 3-5 bullet points only (start each line with '- '). No intro sentence. Do NOT ask questions. Do NOT use numbered lists.",
     "narrative_prose":    "Write 2-3 short paragraphs. No bullet points.",
     "concise_direct":     "Reply in at most 3 sentences. Be direct.",
@@ -77,15 +81,183 @@ STRATEGIES = {
     "comparison_table":   "Return a single MARKDOWN TABLE only. Use columns that help compare options (e.g., Option | Pros | Cons | Best for). No bullets outside the table.",
     "visualization":      "Return a simple TEXT visualization only (ASCII bar chart or small table-of-values). Put it in a fenced code block. No extra prose outside the code block.",
 }
-STRATEGY_NAMES = list(STRATEGIES.keys())
+
+# Module-level strategy state (may be overwritten by `reload_strategies()`).
+# - `STRATEGY_ITEMS`: all strategies (enabled + disabled), keyed by id.
+# - `STRATEGIES`: instruction map for all strategies, keyed by id.
+# - `STRATEGY_NAMES`: enabled strategy ids (used by bandit selection/summary loops).
+STRATEGY_ITEMS: dict[str, dict] = {}
+STRATEGIES: dict[str, str] = dict(DEFAULT_STRATEGIES)
+STRATEGY_NAMES: list[str] = list(DEFAULT_STRATEGIES.keys())
+STRATEGY_LABELS: dict[str, str] = {
+    "structured_bullets": "Structured Bullets",
+    "narrative_prose": "Narrative Prose",
+    "concise_direct": "Concise & Direct",
+    "socratic_questions": "Socratic Questions",
+    "step_by_step": "Step-by-Step",
+    "comparison_table": "Comparison Table",
+    "visualization": "Visualization",
+}
 K = len(STRATEGY_NAMES)
 
 # Paths: HERE = backend/, parent = vivek/ (project root).
 HERE = Path(__file__).resolve().parent
-# Frontend entry point served at GET /. Modular layout: frontend/ holds all UI assets.
-INDEX_HTML = HERE.parent / "frontend" / "index.html"
+# Frontend entry point served at GET /. Prefer the Vite production build.
+_FRONTEND_VUE_DIST_INDEX = HERE.parent / "frontend-vue" / "dist" / "index.html"
+INDEX_HTML = (
+    _FRONTEND_VUE_DIST_INDEX
+    if _FRONTEND_VUE_DIST_INDEX.exists()
+    else HERE.parent / "frontend" / "index.html"
+)
 
 # Skills document — high-level chart/widget guidance injected into LLM prompts.
 # Override with SKILLS_PATH env var if needed.
 SKILLS_PATH = Path(os.getenv("SKILLS_PATH", str(HERE.parent / "skills.md")))
 SKILLS_CONTENT = SKILLS_PATH.read_text(encoding="utf-8") if SKILLS_PATH.exists() else ""
+
+# -----------------------------------------------------------------------------
+# Dynamic strategy store (admin-manageable bandit bars)
+# -----------------------------------------------------------------------------
+STRATEGIES_JSON_PATH = os.getenv("STRATEGIES_JSON_PATH", str(HERE.parent / "strategies.json"))
+# RLock because `persist_strategies()` calls `reload_strategies()` which also acquires the lock.
+_STRATEGIES_LOCK = threading.RLock()
+
+def _read_strategies_json() -> dict:
+    """
+    strategies.json format:
+      {
+        "version": 1,
+        "items": [
+          { "id": "...", "label": "...", "instruction": "...", "enabled": true, "event_name": "Decision" }
+        ]
+      }
+    """
+    try:
+        with open(STRATEGIES_JSON_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        return {}
+
+
+def reload_strategies() -> None:
+    """
+    Reload `strategies.json` into module-level globals.
+    Safe to call multiple times.
+    """
+    global STRATEGY_ITEMS, STRATEGIES, STRATEGY_NAMES, STRATEGY_LABELS, K
+
+    with _STRATEGIES_LOCK:
+        data = _read_strategies_json()
+        items = data.get("items") if isinstance(data, dict) else None
+        if not isinstance(items, list) or not items:
+            # Bootstrapped defaults (no dynamic strategies yet).
+            STRATEGY_ITEMS = {k: {"id": k, "instruction": v, "label": STRATEGY_LABELS.get(k, k), "enabled": True, "event_name": ""} for k, v in DEFAULT_STRATEGIES.items()}
+            STRATEGIES = dict(DEFAULT_STRATEGIES)
+            STRATEGY_NAMES = list(DEFAULT_STRATEGIES.keys())
+            K = len(STRATEGY_NAMES)
+            return
+
+        next_items: dict[str, dict] = {}
+        next_strategies: dict[str, str] = {}
+        next_labels: dict[str, str] = {}
+        enabled_ids: list[str] = []
+
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            sid = str(it.get("id") or "").strip()
+            instruction = str(it.get("instruction") or "").strip()
+            if not sid or not instruction:
+                continue
+            label = str(it.get("label") or sid).strip()
+            enabled = bool(it.get("enabled", True))
+            event_name = str(it.get("event_name") or "").strip()
+
+            next_items[sid] = {"id": sid, "label": label, "instruction": instruction, "enabled": enabled, "event_name": event_name}
+            next_strategies[sid] = instruction
+            next_labels[sid] = label
+            if enabled:
+                enabled_ids.append(sid)
+
+        # If admin disabled everything, keep at least the bootstrap defaults enabled to avoid breaking TS loops.
+        if not enabled_ids:
+            enabled_ids = list(DEFAULT_STRATEGIES.keys())
+            next_items = {k: {"id": k, "label": STRATEGY_LABELS.get(k, k), "instruction": v, "enabled": True, "event_name": ""} for k, v in DEFAULT_STRATEGIES.items()}
+            next_strategies = dict(DEFAULT_STRATEGIES)
+            next_labels = dict(STRATEGY_LABELS)
+
+        STRATEGY_ITEMS = next_items
+        STRATEGIES = next_strategies
+        STRATEGY_LABELS = next_labels
+        STRATEGY_NAMES = enabled_ids
+        K = len(STRATEGY_NAMES)
+
+
+def _atomic_write_strategies_json(data: dict) -> None:
+    tmp = f"{STRATEGIES_JSON_PATH}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, STRATEGIES_JSON_PATH)
+
+
+def persist_strategies(items: list[dict]) -> None:
+    """
+    Persist `strategies.json` then reload module globals.
+    `items` should be a list of:
+      {id, label, instruction, enabled, event_name}
+    """
+    payload = {"version": 1, "items": items}
+    with _STRATEGIES_LOCK:
+        _atomic_write_strategies_json(payload)
+        reload_strategies()
+
+
+# Initial load at import time.
+reload_strategies()
+
+# -----------------------------------------------------------------------------
+# Auth (JWT)
+# -----------------------------------------------------------------------------
+JWT_SECRET = os.getenv("JWT_SECRET", "dev-change-me-please")
+JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+JWT_EXPIRE_SECONDS = int(os.getenv("JWT_EXPIRE_SECONDS", str(60 * 60 * 24 * 7)))
+
+# -----------------------------------------------------------------------------
+# Admin authorization (primitives are admin-only)
+# -----------------------------------------------------------------------------
+# Admins can manage primitives and have their primitives injected into the LLM prompt.
+#
+# Setup options:
+# 1) Provide a single admin to auto-create on startup:
+#    - ADMIN_USERNAME
+#    - ADMIN_EMAIL
+#    - ADMIN_PASSWORD
+# 2) Or mark existing users as admin via lists:
+#    - ADMIN_USERNAMES (comma-separated)
+#    - ADMIN_EMAILS (comma-separated)
+# 3) Or mark specific users by id:
+#    - ADMIN_USER_IDS (comma-separated)
+#
+# If no admin config is provided, the backend keeps the previous behavior
+# (any authenticated user can access primitives).
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "").strip()
+ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "").strip()
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "").strip()
+
+def _split_csv(s: str) -> list[str]:
+    return [x.strip() for x in (s or "").split(",") if x.strip()]
+
+ADMIN_USERNAMES = _split_csv(os.getenv("ADMIN_USERNAMES", "")) or ([ADMIN_USERNAME] if ADMIN_USERNAME else [])
+ADMIN_EMAILS = _split_csv(os.getenv("ADMIN_EMAILS", "")) or ([ADMIN_EMAIL] if ADMIN_EMAIL else [])
+ADMIN_USER_IDS = _split_csv(os.getenv("ADMIN_USER_IDS", ""))
+
+# Used by server-side gating logic.
+ADMIN_CONFIGURED = bool(ADMIN_USERNAMES or ADMIN_EMAILS or ADMIN_USER_IDS)
+
+# SQLite persistence
+DB_PATH = os.getenv("DB_PATH", str(HERE.parent / "adaptiveui.sqlite3"))
+
+# JSON persistence for user primitives (when DB/SQL is not desired).
+PRIMITIVES_JSON_PATH = os.getenv("PRIMITIVES_JSON_PATH", str(HERE.parent / "user_primitives.json"))
