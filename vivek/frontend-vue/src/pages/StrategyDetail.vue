@@ -314,13 +314,14 @@ watch(
 </script>
 
 <template>
-  <div class="max-w-6xl mx-auto space-y-4">
+  <div class="max-w-7xl mx-auto page-shell page-shell-analytics">
+    <div class="space-y-4 p-5 lg:p-7 page-content">
     <div class="flex items-center justify-between gap-3 flex-wrap">
       <Button variant="outline" class="h-9" @click="router.push('/app/strategies')">← Back to Strategies</Button>
       <Button variant="outline" class="h-9" @click="loadData" :disabled="loading">{{ loading ? 'Refreshing…' : 'Refresh' }}</Button>
     </div>
 
-    <Card class="p-4 detail-card">
+    <Card class="p-4 detail-card premium-card">
       <div v-if="item" class="space-y-3">
         <div>
           <div class="text-xs uppercase tracking-wide text-muted-foreground">Strategy detail</div>
@@ -370,7 +371,7 @@ watch(
       <div v-else class="text-sm text-muted-foreground">Loading strategy details...</div>
     </Card>
 
-    <Card v-if="item" class="p-4 detail-card">
+    <Card v-if="item" class="p-4 detail-card premium-card">
       <div class="text-sm font-medium mb-3">Analytics</div>
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-3">
         <div class="rounded-lg border border-border/70 bg-card/70 p-3">
@@ -410,7 +411,7 @@ watch(
       </div>
     </Card>
 
-    <Card v-if="item && edit" class="p-4 detail-card">
+    <Card v-if="item && edit" class="p-4 detail-card premium-card">
       <div class="flex items-center justify-between gap-3 flex-wrap mb-3">
         <div class="text-sm font-medium">Instruction editor</div>
         <div class="flex items-center gap-2">
@@ -455,7 +456,7 @@ watch(
       </div>
     </Card>
 
-    <Card v-if="item" class="p-4 detail-card">
+    <Card v-if="item" class="p-4 detail-card premium-card">
       <div class="flex items-center justify-between mb-2">
         <div>
           <div class="text-sm font-medium">Version History</div>
@@ -477,6 +478,7 @@ watch(
         </div>
       </div>
     </Card>
+    </div>
   </div>
 </template>
 

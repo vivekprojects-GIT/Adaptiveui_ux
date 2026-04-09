@@ -1,15 +1,24 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 
 const open = ref<Record<number, boolean>>({ 0: true })
 
 function toggle(i: number) {
   open.value[i] = !open.value[i]
 }
+
+const roadmap = [
+  { label: 'Adaptive memory graph', progress: 82 },
+  { label: 'Causal strategy debugger', progress: 68 },
+  { label: 'Confidence-calibrated widgets', progress: 74 },
+] as const
+
+const maxProgress = computed(() => Math.max(...roadmap.map((x) => x.progress)))
 </script>
 
 <template>
-  <div class="max-w-3xl mx-auto space-y-8 pb-12">
+  <div class="max-w-5xl mx-auto pb-10 page-shell page-shell-future">
+    <div class="space-y-8 p-5 lg:p-8 page-content">
     <div class="space-y-2">
       <div class="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">Adaptive Presentation Engine</div>
       <h1 class="text-2xl font-semibold tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-emerald-500 via-teal-500 to-cyan-500">Cognitive Mental Model</h1>
@@ -19,7 +28,7 @@ function toggle(i: number) {
       </p>
     </div>
 
-    <div class="rounded-2xl border bg-card p-5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+    <div class="rounded-2xl border premium-card p-5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 hover-lift">
       <div>
         <div class="font-semibold">Margaret Chen</div>
         <div class="text-xs text-muted-foreground mt-0.5">VG-0847291 · 4 months · 47 interactions</div>
@@ -40,7 +49,7 @@ function toggle(i: number) {
       </div>
     </div>
 
-    <section class="rounded-2xl border bg-card/50 p-5 space-y-3">
+    <section class="rounded-2xl border premium-card p-5 space-y-3 hover-lift">
       <div class="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Portrait summary</div>
       <p class="text-sm leading-relaxed text-muted-foreground">
         Margaret processes financial decisions through
@@ -52,6 +61,28 @@ function toggle(i: number) {
         during market stress rather than forward projections. Tax-related and retirement planning facets are still
         developing — the system is actively exploring presentation strategies in these contexts.
       </p>
+    </section>
+
+    <section class="rounded-2xl border premium-card p-5 space-y-3">
+      <div class="flex items-center justify-between">
+        <h2 class="text-sm font-semibold">Roadmap momentum</h2>
+        <span class="text-[10px] uppercase tracking-wide text-muted-foreground">animated signal</span>
+      </div>
+      <div class="space-y-3">
+        <div v-for="item in roadmap" :key="item.label" class="space-y-1">
+          <div class="flex items-center justify-between text-xs">
+            <span class="text-foreground/90">{{ item.label }}</span>
+            <span class="font-mono text-muted-foreground">{{ item.progress }}%</span>
+          </div>
+          <div class="h-2 rounded-full bg-muted/60 overflow-hidden">
+            <div
+              class="h-full rounded-full progress-bar"
+              :style="{ width: `${item.progress}%`, opacity: item.progress / maxProgress }"
+            />
+          </div>
+        </div>
+      </div>
+      <div class="future-line mt-2" />
     </section>
 
     <div class="flex items-baseline justify-between gap-4">
@@ -140,5 +171,47 @@ function toggle(i: number) {
       interactions; emerging facets are still being shaped. Every interaction updates the weights; the portrait is never
       frozen.
     </p>
+    </div>
   </div>
 </template>
+
+<style scoped>
+.progress-bar {
+  background: linear-gradient(90deg, rgba(34, 211, 238, 0.95), rgba(52, 211, 153, 0.9));
+  transform-origin: left center;
+  animation: growBar 900ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.future-line {
+  height: 44px;
+  border-radius: 999px;
+  background:
+    radial-gradient(circle at 22% 50%, rgba(34, 211, 238, 0.5), transparent 28%),
+    radial-gradient(circle at 58% 50%, rgba(52, 211, 153, 0.45), transparent 30%),
+    linear-gradient(90deg, rgba(34, 211, 238, 0.18), rgba(52, 211, 153, 0.2));
+  animation: waveGlow 2.8s ease-in-out infinite;
+}
+
+@keyframes growBar {
+  from {
+    transform: scaleX(0.2);
+    filter: saturate(0.7);
+  }
+  to {
+    transform: scaleX(1);
+    filter: saturate(1);
+  }
+}
+
+@keyframes waveGlow {
+  0%,
+  100% {
+    box-shadow: 0 0 0 rgba(34, 211, 238, 0);
+    background-position: 0% 50%;
+  }
+  50% {
+    box-shadow: 0 0 32px rgba(34, 211, 238, 0.16);
+    background-position: 100% 50%;
+  }
+}
+</style>

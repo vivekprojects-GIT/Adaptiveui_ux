@@ -1,0 +1,31 @@
+<svg width="1600" height="900" viewBox="0 0 1600 900" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="futureBase" x1="0" y1="0" x2="1600" y2="900" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#09101F"/>
+      <stop offset="0.52" stop-color="#0E1B33"/>
+      <stop offset="1" stop-color="#0C1A2C"/>
+    </linearGradient>
+    <radialGradient id="f1" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(320 120) rotate(26) scale(600 380)">
+      <stop stop-color="#22D3EE" stop-opacity="0.4"/>
+      <stop offset="1" stop-color="#22D3EE" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="f2" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(1260 170) rotate(-14) scale(530 320)">
+      <stop stop-color="#2DD4BF" stop-opacity="0.34"/>
+      <stop offset="1" stop-color="#2DD4BF" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1600" height="900" fill="url(#futureBase)"/>
+  <rect width="1600" height="900" fill="url(#f1)"/>
+  <rect width="1600" height="900" fill="url(#f2)"/>
+  <g opacity="0.3">
+    <path d="M0 760C210 740 370 640 530 610C780 560 910 660 1130 620C1320 585 1450 520 1600 480" stroke="#22D3EE" stroke-width="2"/>
+    <path d="M0 820C240 790 360 700 560 670C770 640 920 740 1120 710C1320 680 1440 620 1600 590" stroke="#34D399" stroke-width="2"/>
+  </g>
+  <g opacity="0.16">
+    <circle cx="260" cy="680" r="6" fill="#22D3EE"/>
+    <circle cx="560" cy="620" r="6" fill="#22D3EE"/>
+    <circle cx="860" cy="670" r="6" fill="#34D399"/>
+    <circle cx="1160" cy="620" r="6" fill="#34D399"/>
+    <circle cx="1390" cy="560" r="6" fill="#22D3EE"/>
+  </g>
+</svg>

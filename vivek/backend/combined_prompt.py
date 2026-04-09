@@ -17,11 +17,145 @@ This matches Claude's architecture: one model, one generation, no sequential del
 
 from __future__ import annotations
 
+import json
 import re
-from typing import Tuple
+from typing import Any, Tuple
 
 from . import config
 from .widget_prompt import inject_design_system
+
+
+def strip_widget_markdown_fences(raw: str) -> str:
+    """Remove ```json ... ``` wrappers often emitted inside <WIDGET> despite instructions."""
+    s = (raw or "").strip()
+    if not s or "```" not in s:
+        return s
+    fence = re.search(r"```(?:json|html|javascript|js)?\s*(.*?)```", s, re.DOTALL | re.IGNORECASE)
+    if fence:
+        return fence.group(1).strip()
+    return re.sub(r"```\w*", "", s).strip()
+
+
+def parse_widget_schema_object(s: str) -> Any | None:
+    """Parse first JSON value; tolerate leading/trailing prose via JSONDecoder.raw_decode."""
+    s = strip_widget_markdown_fences(s).strip()
+    if not s:
+        return None
+    dec = json.JSONDecoder()
+    for start_ch in ("{", "["):
+        idx = s.find(start_ch)
+        if idx == -1:
+            continue
+        try:
+            obj, _ = dec.raw_decode(s, idx)
+            return obj
+        except json.JSONDecodeError:
+            continue
+    try:
+        return json.loads(s)
+    except json.JSONDecodeError:
+        return None
+
+
+_BLOCK_TYPES = frozenset({"text", "kpi_row", "chart", "table", "action_row"})
+
+
+def coerce_widget_schema_root(obj: Any) -> dict[str, Any] | None:
+    """Ensure root has layout: [] (alias blocks/components; wrap bare arrays)."""
+    if obj is None:
+        return None
+    if isinstance(obj, list):
+        return {"version": "1.0", "layout": obj}
+    if not isinstance(obj, dict):
+        return None
+    out = dict(obj)
+    # Unwrap { "widget": { "layout": [...] } } or { "schema": {...} }
+    if isinstance(out.get("widget"), dict):
+        inner = dict(out.pop("widget"))
+        out = {**out, **inner}
+    if isinstance(out.get("schema"), dict):
+        inner = dict(out.pop("schema"))
+        out = {**out, **inner}
+    if "layout" not in out or not isinstance(out.get("layout"), list):
+        if isinstance(out.get("blocks"), list):
+            out["layout"] = out["blocks"]
+        elif isinstance(out.get("components"), list):
+            out["layout"] = out["components"]
+        elif isinstance(out.get("Layout"), list):
+            out["layout"] = out.pop("Layout")
+    # layout is a single block object (common model mistake)
+    lay = out.get("layout")
+    if isinstance(lay, dict) and lay.get("type"):
+        out["layout"] = [lay]
+    # Root is one block with no layout key
+    if not isinstance(out.get("layout"), list) and out.get("type") in _BLOCK_TYPES:
+        ver = out.pop("version", None)
+        block = dict(out)
+        out = {"version": str(ver or "1.0"), "layout": [block]}
+    return out
+
+
+def widget_schema_json_is_valid(schema_str: str) -> bool:
+    if not (schema_str or "").strip():
+        return False
+    try:
+        o = json.loads(schema_str)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(o, dict) and isinstance(o.get("layout"), list)
+
+
+def extract_embeddable_html_document(raw: str) -> str | None:
+    """
+    If the model put HTML/JS widgets inside <WIDGET> while WIDGET_MODE=json, return a full HTML
+    document suitable for inject_design_system + iframe. Otherwise None.
+    """
+    s = strip_widget_markdown_fences((raw or "").strip())
+    if not s or "<" not in s or ">" not in s:
+        return None
+    st = s.lstrip()
+    if st.startswith("{") and "<div" not in s.lower() and "<html" not in s.lower():
+        return None
+    low = s.lower()
+    if "<html" in low or "<!doctype" in low:
+        return re.sub(r"<!DOCTYPE[^>]*>", "", s, flags=re.IGNORECASE).strip()
+    if any(
+        tag in low
+        for tag in (
+            "<script",
+            "<body",
+            "<div",
+            "<canvas",
+            "<iframe",
+            "<form",
+            "<input",
+            "<button",
+            "<style",
+        )
+    ):
+        inner = re.sub(r"<!DOCTYPE[^>]*>", "", s, flags=re.IGNORECASE).strip()
+        if "<html" not in inner.lower():
+            return f"<html><head></head><body>{inner}</body></html>"
+        return inner
+    return None
+
+
+def finalize_widget_schema_json(raw: str) -> str:
+    """
+    Normalize model output for the Vue renderer: strip fences, extract JSON, coerce layout.
+    Returns a string safe for JSON.parse on the client (or best-effort stripped text).
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+    obj = parse_widget_schema_object(raw)
+    if obj is None:
+        return strip_widget_markdown_fences(raw)
+    coerced = coerce_widget_schema_root(obj)
+    if coerced is None:
+        return json.dumps(obj, ensure_ascii=False)
+    return json.dumps(coerced, ensure_ascii=False)
+
 
 _JSON_WIDGET_RULE = """
 WIDGET JSON SCHEMA MODE (WIDGET_MODE=json):
@@ -45,6 +179,7 @@ Data grounding:
 
 Interactivity:
 - Use action_row buttons to request follow-ups via intent strings (e.g., "explain_methodology", "show_risks").
+- If the user needs true controls (sliders, inputs, live calculator) that the JSON blocks cannot express, you MAY put a complete mini HTML document (with inline JS) inside <WIDGET> instead of JSON — the app will still render it. Prefer JSON when charts/KPIs/tables suffice.
 """
 
 
@@ -191,6 +326,80 @@ Color & theming (best-in-class readability + polish):
 - Grid/labels must always be visible: explicitly set label/text/grid colors for the chart engine.
 """
 
+# Strict bandit primitive: extra lines for <RESPONSE> when STRICT_PRIMITIVES is on (prompt-only).
+_STRICT_PRIMITIVE_EXTRAS: dict[str, str] = {
+    "structured_bullets": (
+        "Use only the format in the Rule: 3–5 lines, each starting with '- '. "
+        "Do not use numbered lists or paragraph prose as the main answer."
+    ),
+    "narrative_prose": (
+        "Use only short paragraphs (no '- ' bullets, no numbered list as the main answer)."
+    ),
+    "concise_direct": (
+        "Obey the sentence limit in the Rule. No bullet or numbered lists unless the Rule allows."
+    ),
+    "socratic_questions": (
+        "Match the Rule: brief acknowledgement, then 1–2 questions only — not a full tutorial."
+    ),
+    "step_by_step": (
+        "Use only a numbered list (3–6 steps). Do not use '-' bullets for the main steps."
+    ),
+    "comparison_table": (
+        "Output ONLY a GitHub-flavored markdown table: one header row, a |---| separator row, then data rows. "
+        "No section titles, bullets, or paragraphs outside the table. Do not put JSON in <RESPONSE>."
+    ),
+    "visualization": (
+        "Output ONLY one markdown fenced code block (triple backticks). Inside: ASCII bar chart (#) and/or "
+        "aligned text columns. Do not put raw JSON in <RESPONSE>. No prose outside that single code block."
+    ),
+}
+
+
+def build_strict_response_rule_line(strategy_id: str) -> str:
+    """Instructions so <RESPONSE> matches the selected bandit strategy (strict primitive)."""
+    base = (
+        "MANDATORY for <RESPONSE> — follow the Strategy and Rule below exactly. "
+        "Do not substitute a different format; the UI label must match what you write."
+    )
+    extra = _STRICT_PRIMITIVE_EXTRAS.get(strategy_id, "").strip()
+    if extra:
+        return f"{base} {extra}"
+    return base
+
+
+def is_social_or_greeting_turn(user_message: str) -> bool:
+    """Short greeting/thanks/goodbye only — no bandit strategy format (used for prompt routing only)."""
+    t = (user_message or "").strip()
+    if not t or len(t) > 160:
+        return False
+    tl = " ".join(t.lower().split())
+    if "?" in t and len(t) > 25:
+        return False
+    if re.fullmatch(
+        r"(hi|hello|hey|yo|sup|hiya|bye|goodbye|ok|okay|k|cheers|thx|ty|thanks|thank you)"
+        r"([!?.])*",
+        tl,
+    ):
+        return True
+    if re.fullmatch(
+        r"(thanks|thank you)( a lot| so much| again)?([!?.])*",
+        tl,
+    ):
+        return True
+    if re.fullmatch(
+        r"(good )?(morning|afternoon|evening|night)([!?.])*",
+        tl,
+    ):
+        return True
+    if re.fullmatch(r"got it([!?.])*", tl):
+        return True
+    if re.fullmatch(
+        r"(hi|hello|hey)\s+(there|everyone|all|team)([!?.])*",
+        tl,
+    ):
+        return True
+    return False
+
 
 def build_combined_system_prompt(
     strategy_id: str,
@@ -235,11 +444,28 @@ def build_combined_system_prompt(
             "If your HTML is missing any of these, the widget will be rejected and replaced.\n"
         )
 
-    response_rule_line = (
-        "Follow this exactly for the text inside <RESPONSE>."
-        if getattr(config, "STRICT_PRIMITIVES", False)
-        else "Treat this as a style hint for <RESPONSE> (do not be rigid)."
-    )
+    social_only = is_social_or_greeting_turn(user_message)
+    if social_only:
+        response_rule_line = (
+            "GENERAL / SOCIAL TURN — ignore Strategy and Rule below. "
+            "Reply in 1–2 short, natural sentences only. No bullets, tables, numbered lists, or fenced code blocks."
+        )
+    elif getattr(config, "STRICT_PRIMITIVES", False):
+        response_rule_line = build_strict_response_rule_line(strategy_id)
+    else:
+        response_rule_line = "Treat this as a style hint for <RESPONSE> (do not be rigid)."
+
+    social_turn_banner = ""
+    if social_only:
+        social_turn_banner = """
+═══════════════════════════════════════════════════════
+GENERAL QUESTION — GREETING / THANKS / GOODBYE (no bandit strategy)
+═══════════════════════════════════════════════════════
+The user's message is only a greeting, thanks, acknowledgement, or goodbye.
+- <RESPONSE>: Brief, friendly, natural text. Do NOT apply the bandit Strategy or Rule shown below.
+- <WIDGET>: Return exactly <WIDGET></WIDGET> (empty). No chart, no dashboard, no placeholder HTML.
+═══════════════════════════════════════════════════════
+"""
 
     widget_mode = getattr(config, "WIDGET_MODE", "json").strip().lower()
     widget_format_line = (
@@ -301,7 +527,7 @@ TOKEN LIMIT — you have ~{combined_max_tokens} tokens total for <RESPONSE> + <W
 """
 
     return f"""You are an expert AI assistant with rich interactive output capabilities.
-
+{social_turn_banner}
 Output style: No emojis. Neat, clean, professional — in both <RESPONSE> text and <WIDGET>.
 {token_limit_block}
 {_OUTPUT_CONTRACT_STRICT}
@@ -312,7 +538,7 @@ The widget block may be empty for text-only turns where interactivity is not hel
 CRITICAL — Never describe a widget you do not generate. If your <RESPONSE> mentions "the dashboard below", "interactive chart", "explore visually", or anything that implies a visualization exists, you MUST output a complete, non-empty <WIDGET>. Do NOT say "the dashboard below" if you return empty <WIDGET></WIDGET>. Either generate the full widget HTML or do not mention it in the text at all.
 
 Only return an EMPTY widget block (<WIDGET></WIDGET>) when the turn is not “widget-worthy”:
-- greetings (hi, hello, hey), acknowledgements (thanks, ok, got it), pure chit-chat
+- greetings (hi, hello, hey), acknowledgements (thanks, ok, got it), goodbyes (bye, goodbye), pure chit-chat — on these turns do NOT apply the bandit Strategy/Rule to <RESPONSE>; use a short natural reply
 - conceptual Q&A with no dataset/comparison/actionable metrics
 - planning/roadmap/implementation-step requests where prose is the primary output
 
@@ -440,15 +666,15 @@ def parse_combined_output(raw: str) -> Tuple[str, str]:
     widget_match = re.search(r"<WIDGET>(.*?)</WIDGET>", raw, re.DOTALL | re.IGNORECASE)
     if widget_match:
         raw_widget = widget_match.group(1).strip()
-        # Strip markdown fences if model wrapped in ```...```
-        if "```" in raw_widget:
-            fence = re.search(r"```(?:json|html)?\s*(.*?)```", raw_widget, re.DOTALL | re.IGNORECASE)
-            raw_widget = fence.group(1).strip() if fence else re.sub(r"```\w*", "", raw_widget).strip()
 
         widget_mode = getattr(config, "WIDGET_MODE", "json").strip().lower()
         if widget_mode == "json":
-            widget_payload = raw_widget
+            widget_payload = finalize_widget_schema_json(raw_widget)
         else:
+            # HTML mode: strip markdown fences if model wrapped widget in ```...```
+            if "```" in raw_widget:
+                fence = re.search(r"```(?:json|html)?\s*(.*?)```", raw_widget, re.DOTALL | re.IGNORECASE)
+                raw_widget = fence.group(1).strip() if fence else re.sub(r"```\w*", "", raw_widget).strip()
             if "<" in raw_widget and ">" in raw_widget:
                 if "<html" not in raw_widget.lower():
                     raw_widget = f"<html><head></head><body>{raw_widget}</body></html>"

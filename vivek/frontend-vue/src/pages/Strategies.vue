@@ -103,7 +103,7 @@ const eventFilterOptions = computed(() => {
     const ev = eventTypeForItem(it).trim()
     if (ev) opts.add(ev)
   }
-  return ['All', ...Array.from(opts)]
+  return Array.from(opts).sort((a, b) => a.localeCompare(b))
 })
 
 const tableRows = computed(() => {
@@ -157,6 +157,38 @@ const avgSuccessRate = computed(() => (tableRows.value.length ? tableRows.value.
 function formatLastUsed(ts: number | null): string {
   if (!ts) return '—'
   return new Date(ts * 1000).toLocaleDateString(undefined, { month: 'short', day: '2-digit', year: 'numeric' })
+}
+
+function successRateDetails(row: {
+  usage: { wins: number; trials: number }
+  successPct: number
+  posterior: { r: number; u: number }
+}) {
+  const pct = Math.round(row.successPct)
+  if (row.usage.trials > 0) {
+    return `Observed success from feedback: ${row.usage.wins}/${row.usage.trials} = ${pct}%.`
+  }
+  const estPct = Math.round((row.posterior.r ?? 0.5) * 100)
+  return `Estimated success from posterior (no explicit trials yet): ${estPct}% (shown as estimate).`
+}
+
+function statusDetails(row: {
+  status: RowStatus
+  confidence: ConfidenceLevel
+  item: { enabled: boolean }
+  successPct: number
+}) {
+  const pct = Math.round(row.successPct)
+  if (!row.item.enabled) {
+    return `Status: Failing. Reason: strategy is disabled.`
+  }
+  if (row.status === 'Healthy') {
+    return `Status: Healthy. Success ${pct}%, confidence ${row.confidence}.`
+  }
+  if (row.status === 'Review') {
+    return `Status: Review. Success ${pct}%, confidence ${row.confidence}. Consider refining prompt/instruction.`
+  }
+  return `Status: Failing. Success ${pct}%, confidence ${row.confidence}. Needs immediate correction.`
 }
 
 async function loadMe() {
@@ -245,42 +277,42 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="max-w-7xl mx-auto space-y-4">
+  <div class="max-w-[96rem] mx-auto space-y-4">
     <div v-if="isAdmin === false" class="p-4 rounded-xl border glass-panel text-sm text-muted-foreground">
       Strategies are admin-only. Ask an admin to add or edit strategies.
     </div>
 
-    <div v-else class="strategies-pro rounded-2xl border border-border/60 p-4 lg:p-5 space-y-4 text-foreground">
-      <div class="flex items-end justify-between gap-3 flex-wrap">
-        <div>
-          <h1 class="text-2xl font-semibold tracking-tight">Strategies</h1>
-          <p class="text-sm text-muted-foreground mt-1">Operational view for adaptive strategy quality and prompt control.</p>
+    <div v-else class="strategies-pro rounded-2xl border border-border/60 p-4 lg:p-6 space-y-5 text-foreground">
+      <div class="flex items-center justify-between gap-3 flex-wrap">
+        <div class="space-y-1">
+          <h1 class="text-2xl lg:text-3xl font-semibold tracking-tight leading-tight">Strategies</h1>
+          <p class="text-sm text-muted-foreground">Operational view for adaptive strategy quality and prompt control.</p>
         </div>
         <div class="flex items-center gap-2">
-          <Button type="button" variant="outline" class="h-9 px-3" @click="showCreate = !showCreate">
+          <Button type="button" variant="outline" class="h-9 px-4 rounded-full" @click="showCreate = !showCreate">
             {{ showCreate ? 'Hide Create' : 'New Strategy' }}
           </Button>
-          <Button type="button" class="h-9 px-3" @click="loadAll" :disabled="loading">
+          <Button type="button" class="h-9 px-4 rounded-full" @click="loadAll" :disabled="loading">
             {{ loading ? 'Refreshing…' : 'Refresh' }}
           </Button>
         </div>
       </div>
 
       <div class="grid grid-cols-2 xl:grid-cols-5 gap-3">
-        <Card class="p-3 kpi-card"><div class="text-xs text-muted-foreground">Total strategies</div><div class="mt-1 text-3xl font-semibold text-amber-600 dark:text-amber-300">{{ items.length }}</div></Card>
-        <Card class="p-3 kpi-card"><div class="text-xs text-muted-foreground">Healthy</div><div class="mt-1 text-3xl font-semibold text-emerald-600 dark:text-emerald-300">{{ healthyCount }}</div></Card>
-        <Card class="p-3 kpi-card"><div class="text-xs text-muted-foreground">Needs review</div><div class="mt-1 text-3xl font-semibold text-amber-600 dark:text-amber-300">{{ reviewCount }}</div></Card>
-        <Card class="p-3 kpi-card"><div class="text-xs text-muted-foreground">Failing</div><div class="mt-1 text-3xl font-semibold text-rose-600 dark:text-rose-300">{{ failingCount }}</div></Card>
-        <Card class="p-3 kpi-card"><div class="text-xs text-muted-foreground">Avg success rate</div><div class="mt-1 text-3xl font-semibold text-amber-600 dark:text-amber-200">{{ Math.round(avgSuccessRate) }}%</div></Card>
+        <Card class="p-4 kpi-card"><div class="text-[11px] font-medium text-muted-foreground uppercase tracking-wide">Total strategies</div><div class="mt-1 text-3xl font-semibold text-amber-600 dark:text-amber-300 leading-none">{{ items.length }}</div></Card>
+        <Card class="p-4 kpi-card"><div class="text-[11px] font-medium text-muted-foreground uppercase tracking-wide">Healthy</div><div class="mt-1 text-3xl font-semibold text-emerald-600 dark:text-emerald-300 leading-none">{{ healthyCount }}</div></Card>
+        <Card class="p-4 kpi-card"><div class="text-[11px] font-medium text-muted-foreground uppercase tracking-wide">Needs review</div><div class="mt-1 text-3xl font-semibold text-amber-600 dark:text-amber-300 leading-none">{{ reviewCount }}</div></Card>
+        <Card class="p-4 kpi-card"><div class="text-[11px] font-medium text-muted-foreground uppercase tracking-wide">Failing</div><div class="mt-1 text-3xl font-semibold text-rose-600 dark:text-rose-300 leading-none">{{ failingCount }}</div></Card>
+        <Card class="p-4 kpi-card"><div class="text-[11px] font-medium text-muted-foreground uppercase tracking-wide">Avg success rate</div><div class="mt-1 text-3xl font-semibold text-amber-600 dark:text-amber-200 leading-none">{{ Math.round(avgSuccessRate) }}%</div></Card>
       </div>
 
-      <Card v-if="showCreate" class="p-4 space-y-3 panel-card">
+      <Card v-if="showCreate" class="p-4 lg:p-5 space-y-4 panel-card">
         <div class="text-sm font-medium">Create new strategy</div>
         <div class="grid gap-3 md:grid-cols-3">
-          <label class="block"><div class="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1">Id</div><Input v-model="newId" placeholder="e.g. my_custom_strategy" /></label>
-          <label class="block"><div class="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1">Label</div><Input v-model="newLabel" placeholder="e.g. My Custom Strategy" /></label>
+          <label class="block"><div class="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1.5">Id</div><Input v-model="newId" placeholder="e.g. my_custom_strategy" /></label>
+          <label class="block"><div class="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1.5">Label</div><Input v-model="newLabel" placeholder="e.g. My Custom Strategy" /></label>
           <label class="block">
-            <div class="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1">Event name</div>
+            <div class="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1.5">Event name</div>
             <Input v-model="newEventName" list="event-name-suggestions" placeholder="e.g. Escalation, Cancellation, Billing" />
             <datalist id="event-name-suggestions">
               <option v-for="ev in EVENT_TYPE_SUGGESTIONS" :key="ev" :value="ev" />
@@ -288,19 +320,19 @@ onMounted(async () => {
           </label>
         </div>
         <label class="block">
-          <div class="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1">Instruction</div>
+          <div class="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1.5">Instruction</div>
           <textarea v-model="newInstruction" class="w-full min-h-[110px] rounded-lg border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2" />
         </label>
         <div class="flex items-center justify-between">
           <label class="flex items-center gap-2 cursor-pointer select-none text-sm text-muted-foreground"><input v-model="newEnabled" type="checkbox" class="rounded border-input" />Enabled</label>
-          <Button type="button" :disabled="!canCreate" @click="createOne">Create</Button>
+          <Button type="button" class="rounded-full px-4" :disabled="!canCreate" @click="createOne">Create</Button>
         </div>
       </Card>
 
-      <Card class="p-4 panel-card">
-        <div class="flex items-center gap-2 flex-wrap mb-3">
-          <Input v-model="query" placeholder="Search strategy or prompt text…" class="max-w-sm" />
-          <select v-model="sortBy" class="h-9 rounded-lg border border-input bg-background px-3 text-sm text-foreground">
+      <Card class="p-4 lg:p-5 panel-card">
+        <div class="flex items-center gap-2.5 flex-wrap mb-3.5">
+          <Input v-model="query" placeholder="Search strategy or prompt text…" class="max-w-sm min-w-[260px]" />
+          <select v-model="sortBy" class="h-9 rounded-full border border-input bg-background px-3 text-sm text-foreground">
             <option value="status">Sort: Status (failing first)</option>
             <option value="success">Sort: Success rate</option>
             <option value="label">Sort: Label A-Z</option>
@@ -309,7 +341,7 @@ onMounted(async () => {
           <div class="ml-auto text-xs text-muted-foreground">{{ tableRows.length }} shown · {{ items.length }} total · {{ selectedCount }} selected</div>
         </div>
 
-        <div class="space-y-2 mb-3">
+        <div class="space-y-2.5 mb-3.5">
           <div class="flex items-center gap-2 flex-wrap">
             <span class="text-xs text-muted-foreground mr-1">Event:</span>
             <button class="chip" :class="{ active: eventFilter === 'All' }" @click="eventFilter = 'All'">All</button>
@@ -327,7 +359,7 @@ onMounted(async () => {
 
         <div class="overflow-x-auto rounded-xl border border-border/70">
           <table class="w-full min-w-[1120px] text-sm">
-            <thead class="bg-muted/55 text-muted-foreground">
+            <thead class="bg-muted/65 text-muted-foreground sticky top-0 z-[1] backdrop-blur supports-[backdrop-filter]:bg-muted/55">
               <tr>
                 <th class="px-3 py-2 text-left w-8"></th>
                 <th class="px-3 py-2 text-left">Strategy</th>
@@ -345,24 +377,28 @@ onMounted(async () => {
               <tr v-if="tableRows.length === 0">
                 <td colspan="10" class="px-3 py-8 text-center text-muted-foreground">No strategies match the selected filters.</td>
               </tr>
-              <tr v-for="row in tableRows" :key="row.item.id" class="border-t border-border/70 hover:bg-muted/35">
-                <td class="px-3 py-2"><input v-model="selectedMap[row.item.id]" type="checkbox" class="rounded border-input bg-background" /></td>
-                <td class="px-3 py-2">
+              <tr v-for="row in tableRows" :key="row.item.id" class="table-row border-t border-border/70">
+                <td class="px-3 py-2.5 align-top"><input v-model="selectedMap[row.item.id]" type="checkbox" class="rounded border-input bg-background" /></td>
+                <td class="px-3 py-2.5 align-top">
                   <div class="font-medium text-foreground">{{ row.item.label }}</div>
                   <div class="font-mono text-[11px] text-muted-foreground">{{ row.item.id }}</div>
                 </td>
-                <td class="px-3 py-2"><span class="inline-flex rounded-md bg-muted border border-border px-2 py-0.5 text-xs">{{ row.eventType }}</span></td>
-                <td class="px-3 py-2"><span class="text-emerald-600 dark:text-emerald-300">{{ row.usage.wins }}</span> / <span class="text-rose-600 dark:text-rose-300">{{ row.usage.trials }}</span></td>
-                <td class="px-3 py-2">
-                  <div class="flex items-center gap-2">
+                <td class="px-3 py-2.5 align-top"><span class="inline-flex rounded-full bg-muted border border-border px-2.5 py-0.5 text-xs">{{ row.eventType }}</span></td>
+                <td class="px-3 py-2.5 align-top"><span class="text-emerald-600 dark:text-emerald-300">{{ row.usage.wins }}</span> / <span class="text-rose-600 dark:text-rose-300">{{ row.usage.trials }}</span></td>
+                <td class="px-3 py-2.5 align-top">
+                  <div
+                    class="flex items-center gap-2 cursor-help"
+                    :title="successRateDetails(row)"
+                  >
                     <div class="h-2.5 w-20 rounded-full bg-muted"><div class="h-full rounded-full bg-gradient-to-r from-amber-400 to-emerald-400 dark:from-amber-300 dark:to-emerald-300" :style="{ width: `${Math.max(4, Math.min(100, row.successPct))}%` }" /></div>
                     <span class="tabular-nums">{{ Math.round(row.successPct) }}%</span>
                     <span v-if="row.usage.trials === 0" class="text-[11px] text-muted-foreground">(est.)</span>
                   </div>
                 </td>
-                <td class="px-3 py-2">
+                <td class="px-3 py-2.5 align-top">
                   <span
-                    class="inline-flex rounded-md px-2 py-0.5 text-xs border"
+                    class="inline-flex rounded-md px-2 py-0.5 text-xs border cursor-help"
+                    :title="statusDetails(row)"
                     :class="
                       row.confidence === 'High'
                         ? 'border-emerald-500/50 text-emerald-300'
@@ -376,19 +412,24 @@ onMounted(async () => {
                     {{ row.confidence }}
                   </span>
                 </td>
-                <td class="px-3 py-2">
+                <td class="px-3 py-2.5 align-top">
                   <svg viewBox="0 0 110 28" class="h-7 w-[110px]">
                     <path :d="sparklinePath(row.sparkline)" fill="none" stroke="#facc15" stroke-width="2" stroke-linecap="round" />
                   </svg>
                 </td>
-                <td class="px-3 py-2">
+                <td class="px-3 py-2.5 align-top">
                   <span class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs border" :class="row.status === 'Healthy' ? 'border-emerald-500/50 text-emerald-300' : row.status === 'Review' ? 'border-amber-500/50 text-amber-300' : 'border-rose-500/50 text-rose-300'">
                     <span class="h-1.5 w-1.5 rounded-full bg-current" />{{ row.status }}
                   </span>
                 </td>
-                <td class="px-3 py-2 text-muted-foreground">{{ formatLastUsed(row.usage.last_ts) }}</td>
-                <td class="px-3 py-2">
-                  <button class="text-amber-600 hover:text-amber-700 dark:text-amber-200 dark:hover:text-amber-100 text-sm" @click="goToDetail(row.item.id)">View →</button>
+                <td class="px-3 py-2.5 align-top text-muted-foreground">{{ formatLastUsed(row.usage.last_ts) }}</td>
+                <td class="px-3 py-2.5 align-top">
+                  <button
+                    class="inline-flex items-center rounded-full border border-amber-400/40 bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-700 hover:bg-amber-500/15 dark:text-amber-200 dark:hover:bg-amber-500/25"
+                    @click="goToDetail(row.item.id)"
+                  >
+                    View
+                  </button>
                 </td>
               </tr>
             </tbody>
@@ -417,19 +458,46 @@ onMounted(async () => {
   background: color-mix(in oklab, var(--card) 92%, white 8%);
 }
 
+.kpi-card {
+  transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease;
+}
+
+.kpi-card:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 20px -14px rgba(2, 132, 199, 0.45);
+  border-color: color-mix(in oklab, var(--border) 70%, rgb(34 211 238) 30%);
+}
+
 :global(.dark) .kpi-card,
 :global(.dark) .panel-card {
   background: rgba(15, 23, 42, 0.52);
 }
 
+.panel-card {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.table-row {
+  transition: background-color 150ms ease;
+}
+
+.table-row:hover {
+  background: color-mix(in oklab, var(--muted) 52%, transparent);
+}
+
 .chip {
-  height: 1.9rem;
+  height: 2rem;
   border-radius: 999px;
   border: 1px solid color-mix(in oklab, var(--border) 82%, transparent);
   color: color-mix(in oklab, var(--foreground) 84%, transparent);
   background: color-mix(in oklab, var(--card) 92%, transparent);
   font-size: 12px;
-  padding: 0 0.7rem;
+  padding: 0 0.8rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 500;
+  transition: all 160ms ease;
 }
 
 .chip.active {

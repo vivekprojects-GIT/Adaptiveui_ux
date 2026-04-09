@@ -142,7 +142,20 @@ def enforce_response(strategy: str, text: str) -> str:
         try:
             obj = json.loads(t)
             if isinstance(obj, dict) and isinstance(obj.get("columns"), list) and isinstance(obj.get("rows"), list):
-                return json.dumps(obj)
+                cols = [str(c).strip() for c in obj.get("columns", [])]
+                rows = obj.get("rows", [])
+                if cols and isinstance(rows, list):
+                    header = "| " + " | ".join(cols) + " |"
+                    sep = "| " + " | ".join(["---"] * len(cols)) + " |"
+                    data_lines = []
+                    for r in rows[:8]:
+                        if not isinstance(r, list):
+                            continue
+                        vals = [str(v).strip() for v in r[: len(cols)]]
+                        if len(vals) < len(cols):
+                            vals += [""] * (len(cols) - len(vals))
+                        data_lines.append("| " + " | ".join(vals) + " |")
+                    return "\n".join([header, sep] + data_lines) if data_lines else "\n".join([header, sep])
         except Exception:
             pass
 
@@ -163,7 +176,10 @@ def enforce_response(strategy: str, text: str) -> str:
                 ["B", "", "", ""],
             ],
         }
-        return json.dumps(fallback)
+        header = "| Option | Pros | Cons | Best for |"
+        sep = "| --- | --- | --- | --- |"
+        rows = ["| A |  |  |  |", "| B |  |  |  |"]
+        return "\n".join([header, sep] + rows)
 
     if strategy == "visualization":
         try:
@@ -174,7 +190,23 @@ def enforce_response(strategy: str, text: str) -> str:
                 and isinstance(obj.get("labels"), list)
                 and isinstance(obj.get("values"), list)
             ):
-                return json.dumps(obj)
+                labels = [str(x) for x in obj.get("labels", [])]
+                values = obj.get("values", [])
+                pairs: list[tuple[str, float]] = []
+                for i, lab in enumerate(labels):
+                    try:
+                        val = float(values[i]) if i < len(values) else 0.0
+                    except Exception:
+                        val = 0.0
+                    pairs.append((lab, val))
+                max_val = max([abs(v) for _, v in pairs], default=1.0) or 1.0
+                lines = []
+                for lab, val in pairs[:10]:
+                    width = int(round((abs(val) / max_val) * 24))
+                    bar = "#" * max(1, width)
+                    lines.append(f"{lab:<12} | {bar} {val:g}")
+                body = "\n".join(lines) if lines else "A            | #### 1\nB            | #### 1"
+                return f"```text\n{body}\n```"
         except Exception:
             pass
 
@@ -190,6 +222,6 @@ def enforce_response(strategy: str, text: str) -> str:
             "x_label": "Category",
             "y_label": "Value",
         }
-        return json.dumps(fallback)
+        return "```text\nA            | #### 1\nB            | #### 1\n```"
 
     return t

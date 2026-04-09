@@ -3,21 +3,21 @@ import Card from '@/components/ui/Card.vue'
 </script>
 
 <template>
-  <div class="max-w-3xl mx-auto pb-14">
-    <article class="space-y-8">
+  <div class="max-w-5xl mx-auto pb-10 page-shell page-shell-about">
+    <article class="space-y-8 p-5 lg:p-8 page-content">
       <header class="space-y-3">
         <div class="text-[11px] uppercase tracking-[0.24em] text-muted-foreground">Prism Journal</div>
-        <h1 class="text-3xl lg:text-4xl font-semibold tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-emerald-500 via-teal-500 to-cyan-500">
+        <h1 class="text-3xl lg:text-4xl font-semibold tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-emerald-500 via-teal-500 to-cyan-500 text-balance">
           Building AI Answers People Can Read, Trust, and Act On
         </h1>
-        <p class="text-base text-muted-foreground leading-relaxed">
+        <p class="text-base text-muted-foreground leading-relaxed max-w-3xl">
           Prism is an adaptive response engine focused on one outcome: reduce cognitive overload while improving response
           quality. Instead of forcing one output style for every question, Prism learns which presentation works best for
           each context and keeps refining itself through feedback.
         </p>
       </header>
 
-      <Card class="p-5 space-y-3">
+      <Card class="p-5 space-y-3 premium-card hover-lift">
         <div class="text-xs uppercase tracking-wide text-muted-foreground">Why this matters</div>
         <p class="text-sm text-muted-foreground leading-relaxed">
           Most AI experiences fail because they optimize for generation, not comprehension. Prism optimizes for
@@ -28,7 +28,7 @@ import Card from '@/components/ui/Card.vue'
         </blockquote>
       </Card>
 
-      <section class="space-y-3">
+      <section class="space-y-3 premium-card rounded-2xl p-5">
         <h2 class="text-xl font-semibold">How Prism works in one turn</h2>
         <ol class="list-decimal pl-5 space-y-2 text-sm text-muted-foreground leading-relaxed">
           <li>Reads intent + context from the current message and short conversation memory.</li>
@@ -38,7 +38,7 @@ import Card from '@/components/ui/Card.vue'
         </ol>
       </section>
 
-      <section class="space-y-3">
+      <section class="space-y-3 premium-card rounded-2xl p-5">
         <h2 class="text-xl font-semibold">How Prism reduces cognitive overload</h2>
         <ul class="list-disc pl-5 space-y-2 text-sm text-muted-foreground leading-relaxed">
           <li><span class="font-medium text-foreground">Adaptive formatting:</span> switches between concise bullets, narrative, table, or step-flow based on user need.</li>
@@ -48,7 +48,7 @@ import Card from '@/components/ui/Card.vue'
         </ul>
       </section>
 
-      <Card class="p-5 space-y-3">
+      <Card class="p-5 space-y-3 premium-card hover-lift">
         <h2 class="text-xl font-semibold">Token efficiency playbook</h2>
         <p class="text-sm text-muted-foreground leading-relaxed">
           Prism is designed to balance quality with token cost. Use this playbook to reduce output tokens safely:
@@ -66,7 +66,7 @@ import Card from '@/components/ui/Card.vue'
         </div>
       </Card>
 
-      <section class="space-y-3">
+      <section class="space-y-3 premium-card rounded-2xl p-5">
         <h2 class="text-xl font-semibold">What teams can control</h2>
         <p class="text-sm text-muted-foreground leading-relaxed">
           Teams can configure model/provider mode, token budgets, widget mode, strategy library, and diagnostic visibility.
@@ -74,7 +74,7 @@ import Card from '@/components/ui/Card.vue'
         </p>
       </section>
 
-      <Card class="p-5 space-y-3">
+      <Card class="p-5 space-y-3 premium-card hover-lift">
         <h2 class="text-xl font-semibold">Bottom line</h2>
         <p class="text-sm text-muted-foreground leading-relaxed">
           Prism turns AI output into a readable product experience: adaptive, transparent, and cost-aware. It improves

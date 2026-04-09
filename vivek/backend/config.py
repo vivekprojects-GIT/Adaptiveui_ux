@@ -20,9 +20,9 @@ load_dotenv(override=True)
 # Primary mode: "anthropic" (Claude) or "openai_compat" (OpenAI/Groq).
 LLM_MODE = os.getenv("LLM_MODE", "anthropic").lower()
 
-# If false (default), strategy “primitives” are treated as soft style hints
-# and the backend will not aggressively post-process text to enforce them.
-STRICT_PRIMITIVES = os.getenv("STRICT_PRIMITIVES", "0").strip().lower() in {"1", "true", "yes", "on"}
+# When true (default), strategy primitives are mandatory in prompts and
+# enforce_response() reshapes <RESPONSE> to match. Set STRICT_PRIMITIVES=0 for soft hints only.
+STRICT_PRIMITIVES = os.getenv("STRICT_PRIMITIVES", "1").strip().lower() in {"1", "true", "yes", "on"}
 
 # Per-endpoint overrides: /api/chat_plain -> BASELINE, /api/chat -> ADAPTIVE.
 BASELINE_LLM_MODE = os.getenv("BASELINE_LLM_MODE", LLM_MODE).lower()

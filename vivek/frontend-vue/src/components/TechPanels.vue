@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { FEATURE_NAMES, type PosteriorMap } from '@/lib/strategies'
 import { enabledStrategyIds, getStrategyLabel } from '@/lib/strategiesStore'
 
@@ -19,6 +19,12 @@ const props = defineProps<{
 
 const hasFeatures = computed(() => (props.xVec?.length ?? 0) > 0)
 const hasScores = computed(() => props.scores && Object.keys(props.scores).length > 0)
+const pulsePosterior = ref(false)
+const pulseGlobal = ref(false)
+const pulseUserB = ref(false)
+let pulsePosteriorTimer: ReturnType<typeof setTimeout> | null = null
+let pulseGlobalTimer: ReturnType<typeof setTimeout> | null = null
+let pulseUserBTimer: ReturnType<typeof setTimeout> | null = null
 const displayStrategyIds = computed(() => {
   if (enabledStrategyIds.value.length > 0) return enabledStrategyIds.value
   const keys = new Set<string>([
@@ -45,6 +51,46 @@ function dimRow(s: string) {
   if (!props.selectedStrategy) return false
   return s !== props.selectedStrategy
 }
+
+function triggerPulse(target: 'posterior' | 'global' | 'userb') {
+  if (target === 'posterior') {
+    pulsePosterior.value = false
+    if (pulsePosteriorTimer) clearTimeout(pulsePosteriorTimer)
+    setTimeout(() => {
+      pulsePosterior.value = true
+      pulsePosteriorTimer = setTimeout(() => (pulsePosterior.value = false), 420)
+    }, 0)
+    return
+  }
+  if (target === 'global') {
+    pulseGlobal.value = false
+    if (pulseGlobalTimer) clearTimeout(pulseGlobalTimer)
+    setTimeout(() => {
+      pulseGlobal.value = true
+      pulseGlobalTimer = setTimeout(() => (pulseGlobal.value = false), 420)
+    }, 0)
+    return
+  }
+  pulseUserB.value = false
+  if (pulseUserBTimer) clearTimeout(pulseUserBTimer)
+  setTimeout(() => {
+    pulseUserB.value = true
+    pulseUserBTimer = setTimeout(() => (pulseUserB.value = false), 420)
+  }, 0)
+}
+
+watch(
+  () => JSON.stringify(props.userPosterior || {}),
+  () => triggerPulse('posterior'),
+)
+watch(
+  () => JSON.stringify(props.globalPosterior || {}),
+  () => triggerPulse('global'),
+)
+watch(
+  () => JSON.stringify(props.userBPosterior || {}),
+  () => triggerPulse('userb'),
+)
 </script>
 
 <template>
@@ -57,7 +103,7 @@ function dimRow(s: string) {
       </div>
     </details>
 
-    <details v-if="hasScores" class="rounded-xl border bg-card open:shadow-sm" open>
+    <details v-if="hasScores" class="rounded-xl border bg-card open:shadow-sm">
       <summary class="cursor-pointer px-4 py-3 text-xs font-semibold uppercase tracking-wide">Thompson sampling — this turn</summary>
       <div class="px-4 pb-4 border-t space-y-1.5 mt-2">
         <div v-for="s in displayStrategyIds" :key="s" class="flex justify-between text-[11px]">
@@ -67,7 +113,7 @@ function dimRow(s: string) {
       </div>
     </details>
 
-    <details class="rounded-xl border bg-card open:shadow-sm" open>
+    <details class="rounded-xl border bg-card open:shadow-sm" :class="{ 'insight-pulse': pulsePosterior }">
       <summary class="cursor-pointer px-4 py-3 text-xs font-semibold uppercase tracking-wide">Your posterior</summary>
       <div class="px-4 pb-4 border-t space-y-2 mt-3">
         <p v-if="displayStrategyIds.length === 0" class="text-[11px] text-muted-foreground">No strategy bars yet.</p>
@@ -77,7 +123,10 @@ function dimRow(s: string) {
             <span class="font-mono">{{ barPct(s, userPosterior) }}%</span>
           </div>
           <div class="h-1.5 rounded-full bg-muted overflow-hidden">
-            <div class="h-full rounded-full bg-primary transition-all" :style="{ width: barPct(s, userPosterior) + '%' }" />
+            <div
+              class="h-full rounded-full bg-primary bar-fill"
+              :style="{ width: barPct(s, userPosterior) + '%' }"
+            />
           </div>
           <div class="flex items-center gap-1 text-[9px] text-muted-foreground">
             <span>uncertainty</span>
@@ -89,7 +138,7 @@ function dimRow(s: string) {
       </div>
     </details>
 
-    <details class="rounded-xl border bg-card open:shadow-sm" open>
+    <details class="rounded-xl border bg-card open:shadow-sm" :class="{ 'insight-pulse': pulseGlobal }">
       <summary class="cursor-pointer px-4 py-3 text-xs font-semibold uppercase tracking-wide">Global prior — all users</summary>
       <div class="px-4 pb-4 border-t space-y-3 mt-3">
         <p class="text-[11px] text-muted-foreground leading-relaxed">
@@ -112,13 +161,16 @@ function dimRow(s: string) {
             <span class="font-mono">{{ barPct(s, globalPosterior) }}%</span>
           </div>
           <div class="h-1.5 rounded-full bg-muted overflow-hidden">
-            <div class="h-full rounded-full bg-emerald-600/80" :style="{ width: barPct(s, globalPosterior) + '%' }" />
+            <div
+              class="h-full rounded-full bg-emerald-600/80 bar-fill"
+              :style="{ width: barPct(s, globalPosterior) + '%' }"
+            />
           </div>
         </div>
       </div>
     </details>
 
-    <details class="rounded-xl border bg-card open:shadow-sm">
+    <details class="rounded-xl border bg-card open:shadow-sm" :class="{ 'insight-pulse': pulseUserB }">
       <summary class="cursor-pointer px-4 py-3 text-xs font-semibold uppercase tracking-wide">User B — inheriting prior</summary>
       <div class="px-4 pb-4 border-t space-y-2 mt-3">
         <p class="text-[11px] text-muted-foreground leading-relaxed">
@@ -131,13 +183,16 @@ function dimRow(s: string) {
             <span class="font-mono">{{ barPct(s, userBPosterior) }}%</span>
           </div>
           <div class="h-1.5 rounded-full bg-muted overflow-hidden">
-            <div class="h-full rounded-full bg-violet-600/70" :style="{ width: barPct(s, userBPosterior) + '%' }" />
+            <div
+              class="h-full rounded-full bg-violet-600/70 bar-fill"
+              :style="{ width: barPct(s, userBPosterior) + '%' }"
+            />
           </div>
         </div>
       </div>
     </details>
 
-    <details v-if="hasFeatures" class="rounded-xl border bg-card open:shadow-sm" open>
+    <details v-if="hasFeatures" class="rounded-xl border bg-card open:shadow-sm">
       <summary class="cursor-pointer px-4 py-3 text-xs font-semibold uppercase tracking-wide">Feature vector x ∈ ℝ¹⁰</summary>
       <div class="px-4 pb-4 border-t grid grid-cols-2 gap-x-4 gap-y-1 mt-3 text-[11px]">
         <template v-for="(name, i) in FEATURE_NAMES" :key="name">
@@ -161,3 +216,22 @@ function dimRow(s: string) {
     </details>
   </div>
 </template>
+
+<style scoped>
+.bar-fill {
+  transition: width 420ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.insight-pulse {
+  animation: insightPulse 420ms ease-out;
+}
+
+@keyframes insightPulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(34, 211, 238, 0.28);
+  }
+  100% {
+    box-shadow: 0 0 0 10px rgba(34, 211, 238, 0);
+  }
+}
+</style>

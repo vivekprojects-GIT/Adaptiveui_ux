@@ -930,7 +930,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="h-full flex flex-col gap-6 max-w-[1440px] mx-auto p-5 lg:p-8 rounded-3xl glass-panel">
+  <div class="flex flex-col gap-6 max-w-[1440px] mx-auto p-5 lg:p-8 rounded-3xl glass-panel page-shell page-shell-scrollable page-shell-analytics page-content">
     <div class="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
       <div>
         <h1

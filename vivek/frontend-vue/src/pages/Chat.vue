@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { Motion } from '@motionone/vue'
 import Card from '@/components/ui/Card.vue'
@@ -19,8 +19,8 @@ import {
 import { showToast } from '@/lib/toast'
 import { type PosteriorMap } from '@/lib/strategies'
 import { getStrategyLabel } from '@/lib/strategiesStore'
+import { renderAssistantMarkdown } from '@/lib/renderMarkdown'
 import { MOTION_BASE, animatePulse, killAnimationsOf } from '@/lib/motion'
-import { ArrowPathIcon, Cog6ToothIcon, EyeIcon, EyeSlashIcon } from '@/components/icons'
 
 const router = useRouter()
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5051'
@@ -63,8 +63,20 @@ const adaptiveStickToBottom = ref(true)
 const streamPulseEl = ref<HTMLDivElement | null>(null)
 const widgetGenerating = ref(false)
 const widgetGeneratingIdx = ref<number | null>(null)
+/** True while SSE is in widget phase (answer text may already be visible). */
+const widgetStreamPhase = ref(false)
 
 let healthTimer: ReturnType<typeof setInterval> | null = null
+
+/** Grid columns must depend on baseline + insights, or a phantom 3rd track leaves empty space. */
+const chatMainGridClass = computed(() => {
+  const b = showBaseline.value
+  const t = showTechPanels.value
+  if (b && t) return 'lg:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_380px]'
+  if (b && !t) return 'lg:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]'
+  if (!b && t) return 'lg:grid-cols-1 xl:grid-cols-[minmax(0,1fr)_380px]'
+  return 'lg:grid-cols-1 xl:grid-cols-1'
+})
 
 function onGlobalKeydown(e: KeyboardEvent) {
   if (e.key === 'Escape' && showTechPanels.value) closeTechPanels()
@@ -220,6 +232,8 @@ async function runChatPlain(text: string): Promise<void> {
     content: d.response || '',
     elapsed: d.elapsed,
   })
+  await nextTick()
+  if (baselineScrollEl.value && baselineStickToBottom.value) scrollToBottom(baselineScrollEl.value)
 }
 
 async function runChatFallback(text: string, idx: number): Promise<boolean> {
@@ -283,12 +297,17 @@ function handleSseEvent(evt: Record<string, unknown>, idx: number) {
   if (!evt?.type) return
 
   if (evt.type === 'strategy') {
+    widgetStreamPhase.value = false
     streamStatus.value = 'Writing…'
     banditState.activeStrategy = String(evt.strategy ?? '')
     banditState.activeInstruction = String(evt.instruction ?? '')
     banditState.selectedStrategy = String(evt.strategy ?? '')
     banditState.scores = (evt.scores as Record<string, number>) || null
     banditState.lastXVec = Array.isArray(evt.x_vec) ? (evt.x_vec as number[]).map((n) => Number(n)) : null
+    if (cur.role === 'assistant') {
+      cur.strategy = String(evt.strategy ?? '')
+      cur.xVec = Array.isArray(evt.x_vec) ? (evt.x_vec as number[]).map((n) => Number(n)) : []
+    }
     applyPosteriorPack({
       posterior: evt.posterior as PosteriorMap,
       global: evt.global as PosteriorMap,
@@ -298,25 +317,30 @@ function handleSseEvent(evt: Record<string, unknown>, idx: number) {
   }
 
   if (evt.type === 'response_delta') {
-    streamStatus.value = 'Streaming…'
+    widgetStreamPhase.value = false
+    streamStatus.value = 'Streaming answer…'
     cur.content += String((evt as { delta?: string }).delta ?? '')
     requestAdaptiveAutoScroll()
   }
 
   if (evt.type === 'widget_delta') {
-    streamStatus.value = 'Generating widget…'
+    widgetStreamPhase.value = true
+    streamStatus.value = 'Building interactive widget…'
     widgetGenerating.value = true
     widgetGeneratingIdx.value = idx
   }
 
   if (evt.type === 'widget_start') {
-    streamStatus.value = 'Generating widget…'
+    widgetStreamPhase.value = true
+    streamStatus.value = 'Building interactive widget…'
     widgetGenerating.value = true
     widgetGeneratingIdx.value = idx
+    requestAdaptiveAutoScroll()
   }
 
   if (evt.type === 'done') {
     streamStatus.value = ''
+    widgetStreamPhase.value = false
     widgetGenerating.value = false
     widgetGeneratingIdx.value = null
     const e = evt as {
@@ -397,12 +421,20 @@ async function onSend() {
 
   sending.value = true
   isStreaming.value = true
+  widgetStreamPhase.value = false
   streamStatus.value = 'Thinking…'
+  // Each new compare turn should anchor both panes to latest messages.
+  baselineStickToBottom.value = true
+  adaptiveStickToBottom.value = true
 
   plainMessages.value.push({ role: 'user', content: text })
   messages.value.push({ role: 'user', content: text })
   const idx = messages.value.length
   messages.value.push({ role: 'assistant', content: '' })
+
+  await nextTick()
+  if (baselineScrollEl.value && showBaseline.value) scrollToBottom(baselineScrollEl.value)
+  if (adaptiveScrollEl.value) scrollToBottom(adaptiveScrollEl.value)
 
   input.value = ''
 
@@ -491,6 +523,7 @@ async function onSend() {
     sending.value = false
     isStreaming.value = false
     streamStatus.value = ''
+    widgetStreamPhase.value = false
     if (!finalized && !fallbackUsed) {
       try {
         const ok = await runChatFallback(text, idx)
@@ -561,13 +594,34 @@ onMounted(async () => {
   healthTimer = setInterval(fetchHealth, 30000)
 
   window.addEventListener('keydown', onGlobalKeydown)
+  window.addEventListener('chat:control', onShellControl as EventListener)
 })
 
 onUnmounted(() => {
   if (healthTimer) clearInterval(healthTimer)
   killAnimationsOf(streamPulseEl.value)
   window.removeEventListener('keydown', onGlobalKeydown)
+  window.removeEventListener('chat:control', onShellControl as EventListener)
 })
+
+function onShellControl(e: Event) {
+  const action = String((e as CustomEvent).detail?.action ?? '')
+  if (action === 'toggle-baseline') {
+    toggleBaseline()
+    return
+  }
+  if (action === 'toggle-insights') {
+    showTechPanels.value = !showTechPanels.value
+    return
+  }
+  if (action === 'open-preferences') {
+    openPrefs()
+    return
+  }
+  if (action === 'reset') {
+    void onReset()
+  }
+}
 
 watch(
   () => [plainMessages.value.length, messages.value.length],
@@ -588,6 +642,21 @@ function cleanAssistantText(raw: string | undefined | null) {
   const s = String(raw ?? '')
   const noWidgetBlock = s.replace(/<WIDGET>[\s\S]*?<\/WIDGET>/gi, '')
   return noWidgetBlock.replace(/<\/?WIDGET>/gi, '').trim()
+}
+
+/**
+ * While the last assistant message is still receiving *answer* tokens, show plain text so half-written
+ * markdown/tables do not flash. Once the server signals widget loading (`widgetGenerating`), the answer
+ * text is complete — switch to markdown and show the compact widget loader below.
+ */
+function assistantStreamPlain(idx: number): boolean {
+  const m = messages.value[idx]
+  const last = idx === messages.value.length - 1
+  const inWidgetWait =
+    widgetGenerating.value && widgetGeneratingIdx.value === idx
+  return Boolean(
+    isStreaming.value && last && m?.role === 'assistant' && !inWidgetWait,
+  )
 }
 
 function stratLabel(s?: string) {
@@ -623,11 +692,17 @@ function onAdaptiveScroll() {
   if (!adaptiveScrollEl.value) return
   adaptiveStickToBottom.value = isNearBottom(adaptiveScrollEl.value)
 }
+
+function widgetFrameHeight(height?: number): number {
+  const raw = Number(height || 420)
+  if (!Number.isFinite(raw)) return 420
+  return Math.min(Math.max(raw, 300), 520)
+}
 </script>
 
 <template>
-  <div class="h-full min-h-0 max-w-[1400px] mx-auto overflow-hidden grid grid-rows-[auto_minmax(0,1fr)_auto] gap-4">
-    <div class="flex flex-wrap items-center gap-3 justify-between min-h-0">
+  <div class="h-full min-h-0 w-full min-w-0 overflow-hidden grid grid-rows-[auto_minmax(0,1fr)_auto] gap-2">
+    <div class="flex flex-wrap items-center gap-2 justify-between min-h-0">
       <div class="flex items-center gap-3">
         <h1 class="text-lg font-semibold tracking-tight">Chat</h1>
         <span
@@ -645,45 +720,18 @@ function onAdaptiveScroll() {
           {{ healthOk === false ? 'offline' : healthOk === true ? 'online' : 'checking…' }}
         </span>
       </div>
-      <div class="flex flex-wrap gap-2">
-        <Button type="button" variant="outline" class="h-9 text-xs" @click="toggleBaseline">
-          <span class="inline-flex items-center gap-1.5">
-            <component :is="showBaseline ? EyeSlashIcon : EyeIcon" class="h-3.5 w-3.5" />
-            {{ showBaseline ? 'Hide baseline' : 'Show baseline' }}
-          </span>
-        </Button>
-        <Button type="button" variant="outline" class="h-9 text-xs" @click="showTechPanels = !showTechPanels">
-          <span class="inline-flex items-center gap-1.5">
-            <component :is="showTechPanels ? EyeSlashIcon : EyeIcon" class="h-3.5 w-3.5" />
-            {{ showTechPanels ? 'Hide insights' : 'Show insights' }}
-          </span>
-        </Button>
-        <Button type="button" variant="outline" class="h-9 text-xs inline-flex items-center gap-1.5" @click="openPrefs">
-          <Cog6ToothIcon class="h-3.5 w-3.5" />
-          Preferences
-        </Button>
-        <Button type="button" variant="outline" class="h-9 text-xs inline-flex items-center gap-1.5" @click="onReset">
-          <ArrowPathIcon class="h-3.5 w-3.5" />
-          Reset
-        </Button>
-        <div v-if="isStreaming" ref="streamPulseEl" class="text-xs text-muted-foreground self-center px-2">
-          {{ streamStatus || 'Streaming…' }}
-        </div>
-      </div>
+      <div />
     </div>
 
-    <div
-      class="grid gap-4 min-h-0 overflow-hidden items-stretch"
-      :class="showBaseline ? 'lg:grid-cols-2 xl:grid-cols-[360px_1fr_420px]' : 'lg:grid-cols-1 xl:grid-cols-[1fr_420px]'"
-    >
+    <div class="grid gap-2 min-h-0 min-w-0 overflow-hidden items-stretch" :class="chatMainGridClass">
       <Card v-if="showBaseline" class="flex flex-col min-h-0 overflow-hidden shadow-sm">
-        <div class="px-4 py-3 border-b text-xs font-semibold text-muted-foreground uppercase tracking-wide flex items-center justify-between">
+        <div class="px-3 py-2 border-b text-[11px] font-semibold text-muted-foreground uppercase tracking-wide flex items-center justify-between">
           <span>Baseline</span>
           <span class="text-[10px] font-medium px-2 py-0.5 rounded-full border bg-background/60">No bandit</span>
         </div>
         <div
           ref="baselineScrollEl"
-          class="chat-messages chat-pane-scroll flex-1 min-h-0 overflow-y-auto p-4 space-y-3 overscroll-contain scrollbar-gutter-stable"
+          class="chat-messages chat-pane-scroll flex-1 min-h-0 overflow-y-auto p-2.5 space-y-2 overscroll-contain scrollbar-gutter-stable"
           @scroll="onBaselineScroll"
         >
           <template v-if="plainMessages.length === 0">
@@ -705,7 +753,7 @@ function onAdaptiveScroll() {
             >
               <div v-if="m.role === 'user'" class="flex justify-end">
                 <div
-                  class="max-w-[92%] rounded-2xl border bg-accent/15 px-3.5 py-2.5 text-sm shadow-sm transition-all duration-300 hover:-translate-y-0.5 hover:shadow-md hover:shadow-cyan-500/15"
+                  class="max-w-[97%] rounded-2xl border bg-accent/15 px-3 py-2 text-sm shadow-sm transition-all duration-300 hover:-translate-y-0.5 hover:shadow-md hover:shadow-cyan-500/15"
                 >
                   <div class="text-[10px] text-muted-foreground mb-0.5">You</div>
                   <div class="whitespace-pre-wrap">{{ m.content }}</div>
@@ -713,10 +761,15 @@ function onAdaptiveScroll() {
               </div>
               <div v-else class="flex justify-start">
                 <div
-                  class="max-w-[92%] rounded-2xl border bg-card px-3.5 py-2.5 text-sm shadow-sm transition-all duration-300 hover:-translate-y-0.5 hover:shadow-md hover:shadow-cyan-500/15"
+                  class="max-w-[97%] rounded-2xl border bg-card px-3 py-2 text-sm shadow-sm transition-all duration-300 hover:-translate-y-0.5 hover:shadow-md hover:shadow-cyan-500/15"
                 >
                   <div class="text-[10px] text-muted-foreground mb-0.5">Baseline</div>
                   <div v-if="m.error" class="text-red-400 text-sm">⚠ {{ m.error }}</div>
+                  <div
+                    v-else-if="m.role === 'assistant'"
+                    class="assistant-markdown min-w-0 leading-relaxed"
+                    v-html="renderAssistantMarkdown(m.content)"
+                  />
                   <div v-else class="whitespace-pre-wrap leading-relaxed">{{ m.content }}</div>
                   <div v-if="m.elapsed != null" class="text-[10px] text-muted-foreground mt-1">{{ m.elapsed }}s</div>
                 </div>
@@ -726,28 +779,53 @@ function onAdaptiveScroll() {
         </div>
       </Card>
 
-      <Card class="flex flex-col min-h-0 overflow-hidden shadow-sm">
-        <div class="px-4 py-3 border-b text-xs font-semibold text-muted-foreground uppercase tracking-wide flex items-center justify-between">
-          <span>Adaptive</span>
-          <span class="text-[10px] font-medium px-2 py-0.5 rounded-full border bg-background/60">Bandit layer</span>
+      <Card class="flex flex-col min-h-0 min-w-0 overflow-hidden shadow-sm">
+        <div
+          class="px-3 py-2 border-b text-[11px] font-semibold text-muted-foreground uppercase tracking-wide flex items-center justify-between gap-2 flex-wrap"
+        >
+          <div class="flex items-center gap-2 min-w-0">
+            <span>Adaptive</span>
+            <span class="text-[10px] font-medium px-2 py-0.5 rounded-full border bg-background/60 shrink-0">Bandit layer</span>
+          </div>
+          <div
+            v-if="isStreaming"
+            class="flex items-center gap-2 normal-case font-normal text-[11px] rounded-full px-2.5 py-1.5 border max-w-[min(100%,20rem)] transition-colors"
+            :class="
+              widgetStreamPhase
+                ? 'border-cyan-500/45 bg-cyan-500/12 text-cyan-900 dark:text-cyan-100 shadow-sm shadow-cyan-500/10'
+                : 'border-border/80 bg-muted/50 text-foreground/80'
+            "
+          >
+            <span class="relative flex h-2 w-2 shrink-0">
+              <span
+                v-if="widgetStreamPhase"
+                class="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-70"
+              />
+              <span
+                class="relative inline-flex rounded-full h-2 w-2"
+                :class="widgetStreamPhase ? 'bg-cyan-500' : 'bg-primary'"
+              />
+            </span>
+            <span class="truncate">{{ streamStatus || 'Working…' }}</span>
+          </div>
         </div>
         <div
           ref="adaptiveScrollEl"
-          class="chat-messages chat-pane-scroll flex-1 min-h-0 overflow-y-auto p-4 space-y-6 overscroll-contain scrollbar-gutter-stable"
+          class="chat-messages chat-pane-scroll flex-1 min-h-0 overflow-y-auto p-2.5 space-y-2 overscroll-contain scrollbar-gutter-stable"
           @scroll="onAdaptiveScroll"
         >
           <Motion
             v-for="(m, idx) in messages"
             :key="'a-' + idx"
             tag="div"
-            class="space-y-2 premium-reveal"
+            class="space-y-1 premium-reveal"
             :initial="{ opacity: 0, y: 10 }"
             :animate="{ opacity: 1, y: 0 }"
             :transition="{ ...MOTION_BASE, delay: idx * 0.03 }"
           >
             <div class="flex" :class="m.role === 'user' ? 'justify-end' : 'justify-start'">
               <div
-                class="max-w-[92%] md:max-w-[78%] rounded-2xl border px-4 py-3 shadow-sm transition-all duration-300 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-cyan-500/15"
+                class="max-w-[99%] md:max-w-[96%] rounded-2xl border px-3 py-2 shadow-sm transition-all duration-300 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-cyan-500/15"
                 :class="m.role === 'user' ? 'bg-accent/15' : 'bg-card'"
               >
                 <div class="text-xs text-muted-foreground mb-1 flex items-center gap-2 flex-wrap">
@@ -759,7 +837,7 @@ function onAdaptiveScroll() {
                     {{ stratLabel(m.strategy) }}
                   </span>
                 </div>
-                <div class="whitespace-pre-wrap leading-relaxed">
+                <div class="leading-relaxed min-w-0">
                   <template
                     v-if="m.role === 'assistant' && isStreaming && idx === messages.length - 1 && !m.content.trim()"
                   >
@@ -769,25 +847,42 @@ function onAdaptiveScroll() {
                       <span class="typing-dot" />
                     </div>
                   </template>
+                  <template v-else-if="m.role === 'assistant' && assistantStreamPlain(idx)">
+                    <div class="whitespace-pre-wrap">{{ m.content }}</div>
+                  </template>
+                  <template v-else-if="m.role === 'assistant'">
+                    <div class="assistant-markdown" v-html="renderAssistantMarkdown(m.content)" />
+                  </template>
                   <template v-else>
-                    {{ m.content }}
+                    <div class="whitespace-pre-wrap">{{ m.content }}</div>
                   </template>
                 </div>
 
-                <div
-                  v-if="
-                    m.role === 'assistant' &&
-                    widgetGenerating &&
-                    widgetGeneratingIdx === idx &&
-                    !m.widgetHtml &&
-                    !m.widgetSchema
-                  "
-                  class="mt-2 text-xs text-muted-foreground inline-flex items-center gap-2"
-                >
-                  <span class="inline-flex h-2 w-2 rounded-full bg-cyan-500 animate-pulse" />
-                  Generating widget…
-                </div>
               </div>
+            </div>
+
+            <!-- Widget loading: only after answer text exists (server sends widget_start after RESPONSE) -->
+            <div
+              v-if="
+                m.role === 'assistant' &&
+                m.content.trim() &&
+                widgetGenerating &&
+                widgetGeneratingIdx === idx &&
+                !m.widgetHtml &&
+                !m.widgetSchema
+              "
+              class="widget-building-panel mt-2 flex items-center gap-3 rounded-xl border border-cyan-500/30 bg-cyan-500/[0.06] dark:bg-cyan-950/25 px-3 py-2.5 text-xs shadow-sm"
+              role="status"
+              aria-live="polite"
+            >
+              <span class="relative flex h-2.5 w-2.5 shrink-0">
+                <span
+                  class="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-60"
+                />
+                <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-cyan-500" />
+              </span>
+              <span class="font-medium text-cyan-900 dark:text-cyan-100">Preparing widget</span>
+              <span class="text-[11px] text-muted-foreground">Charts or controls load next…</span>
             </div>
 
             <div v-if="m.role === 'assistant' && m.widgetHtml && String(m.widgetHtml).trim()" class="mt-2">
@@ -797,7 +892,7 @@ function onAdaptiveScroll() {
                   :srcdoc="m.widgetHtml"
                   sandbox="allow-scripts allow-same-origin"
                   class="w-full widget-frame border-0"
-                  :style="{ height: `${m.widgetHeight || 420}px` }"
+                  :style="{ height: `${widgetFrameHeight(m.widgetHeight)}px`, maxHeight: '56vh' }"
                 />
               </div>
             </div>
@@ -839,9 +934,9 @@ function onAdaptiveScroll() {
       </Card>
 
       <aside v-if="showTechPanels" class="hidden xl:block min-h-0">
-        <div class="sticky top-20 max-h-[calc(100svh-7.5rem)] overflow-y-auto pr-1">
-          <div class="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-3">Insights</div>
-          <div class="rounded-2xl border bg-card/60 backdrop-blur p-3 shadow-sm">
+        <div class="sticky top-2 max-h-[calc(100svh-1rem)] overflow-y-auto pr-1">
+          <div class="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground mb-2">Insights</div>
+          <div class="rounded-2xl border bg-card/60 backdrop-blur p-2 shadow-sm">
             <TechPanels
               :active-strategy="banditState.activeStrategy"
               :active-instruction="banditState.activeInstruction"
@@ -886,12 +981,12 @@ function onAdaptiveScroll() {
         >
           <div v-if="showTechPanels" class="xl:hidden fixed inset-y-0 right-0 z-[260] w-[92vw] max-w-[440px]">
             <div class="h-full bg-background border-l shadow-2xl flex flex-col" @click.stop>
-              <div class="px-4 py-3 border-b flex items-center justify-between">
-                <div class="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Insights</div>
+              <div class="px-3 py-2 border-b flex items-center justify-between">
+                <div class="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Insights</div>
                 <Button type="button" variant="outline" class="h-9 text-xs" @click="closeTechPanels">Close</Button>
               </div>
-              <div class="p-3 overflow-y-auto min-h-0">
-                <div class="rounded-2xl border bg-card/60 backdrop-blur p-3 shadow-sm">
+              <div class="p-2 overflow-y-auto min-h-0">
+                <div class="rounded-2xl border bg-card/60 backdrop-blur p-2 shadow-sm">
                   <TechPanels
                     :active-strategy="banditState.activeStrategy"
                     :active-instruction="banditState.activeInstruction"
@@ -913,9 +1008,9 @@ function onAdaptiveScroll() {
       </Teleport>
     </div>
 
-    <form class="chat-input-shell flex gap-2 items-end shrink-0 pb-1 pt-2" @submit.prevent="onSend">
+    <form class="chat-input-shell flex gap-2 items-end shrink-0 pt-0 pb-0" @submit.prevent="onSend">
       <div class="flex-1 min-w-0">
-        <div class="text-xs text-muted-foreground mb-1">Message (sent to both panes when baseline is visible)</div>
+        <div class="text-[10px] text-muted-foreground mb-0">Message (sent to both panes when baseline is visible)</div>
         <Input v-model="input" class="w-full" placeholder="Type a message…" />
       </div>
       <Button type="submit" :disabled="sending || !input.trim()" class="h-10 px-5">
@@ -935,12 +1030,12 @@ function onAdaptiveScroll() {
 <style scoped>
 .chat-pane-scroll {
   /* Explicit fallback height for browsers that mis-handle nested flex min-height. */
-  height: var(--chat-pane-height, calc(100dvh - 18rem));
+  height: var(--chat-pane-height, calc(100dvh - 14rem));
 }
 
 @media (min-width: 1024px) {
   .chat-pane-scroll {
-    height: var(--chat-pane-height-lg, calc(100dvh - 19.25rem));
+    height: var(--chat-pane-height-lg, calc(100dvh - 15rem));
   }
 }
 
@@ -986,5 +1081,90 @@ function onAdaptiveScroll() {
     transform: translateY(-4px);
     opacity: 1;
   }
+}
+
+.widget-building-panel {
+  animation: widgetPanelBreathe 2.2s ease-in-out infinite;
+}
+
+@keyframes widgetPanelBreathe {
+  0%,
+  100% {
+    box-shadow: 0 1px 0 0 rgba(6, 182, 212, 0.12);
+  }
+  50% {
+    box-shadow: 0 4px 24px -4px rgba(6, 182, 212, 0.25);
+  }
+}
+
+/* v-html markdown: tables, lists, emphasis */
+.assistant-markdown :deep(p) {
+  margin: 0 0 0.65em;
+}
+.assistant-markdown :deep(p:last-child) {
+  margin-bottom: 0;
+}
+.assistant-markdown :deep(ul),
+.assistant-markdown :deep(ol) {
+  margin: 0.35em 0 0.65em;
+  padding-left: 1.25rem;
+}
+.assistant-markdown :deep(ul) {
+  list-style: disc;
+}
+.assistant-markdown :deep(ol) {
+  list-style: decimal;
+}
+.assistant-markdown :deep(li) {
+  margin: 0.15em 0;
+}
+.assistant-markdown :deep(table) {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8125rem;
+  margin: 0.5rem 0 0.75rem;
+}
+.assistant-markdown :deep(th),
+.assistant-markdown :deep(td) {
+  border: 1px solid hsl(var(--border));
+  padding: 0.4rem 0.55rem;
+  text-align: left;
+  vertical-align: top;
+}
+.assistant-markdown :deep(th) {
+  background: hsl(var(--muted) / 0.45);
+  font-weight: 600;
+}
+.assistant-markdown :deep(tr:nth-child(even) td) {
+  background: hsl(var(--muted) / 0.12);
+}
+.assistant-markdown :deep(a) {
+  color: hsl(var(--primary));
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.assistant-markdown :deep(code) {
+  font-size: 0.85em;
+  padding: 0.1em 0.35em;
+  border-radius: 0.25rem;
+  background: hsl(var(--muted) / 0.5);
+}
+.assistant-markdown :deep(pre) {
+  margin: 0.5rem 0;
+  padding: 0.65rem 0.75rem;
+  border-radius: 0.375rem;
+  background: hsl(var(--muted) / 0.35);
+  overflow-x: auto;
+  font-size: 0.8125rem;
+}
+.assistant-markdown :deep(pre code) {
+  padding: 0;
+  background: transparent;
+}
+.assistant-markdown :deep(blockquote) {
+  margin: 0.5rem 0;
+  padding-left: 0.75rem;
+  border-left: 3px solid hsl(var(--border));
+  color: hsl(var(--muted-foreground));
 }
 </style>

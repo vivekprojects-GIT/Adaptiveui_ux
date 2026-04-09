@@ -295,3 +295,82 @@
   color-scheme: dark;
 }
 
+.page-shell {
+  position: relative;
+  border: 1px solid color-mix(in oklab, var(--border) 82%, transparent);
+  border-radius: 1.25rem;
+  overflow: hidden;
+  isolation: isolate;
+}
+
+.page-shell-scrollable {
+  overflow: visible;
+}
+
+.page-shell::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-size: cover;
+  background-position: center;
+  opacity: 0.72;
+  z-index: -2;
+}
+
+.dark .page-shell::before {
+  opacity: 0.52;
+}
+
+.page-shell::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    180deg,
+    color-mix(in oklab, var(--background) 76%, transparent),
+    color-mix(in oklab, var(--background) 92%, transparent)
+  );
+  z-index: -1;
+}
+
+.page-shell-analytics::before {
+  background-image: url("../assets/bg-analytics.svg");
+}
+
+.page-shell-about::before {
+  background-image: url("../assets/bg-about.svg");
+}
+
+.page-shell-future::before {
+  background-image: url("../assets/bg-future.svg");
+}
+
+.page-content {
+  position: relative;
+  z-index: 1;
+}
+
+.premium-card {
+  border: 1px solid color-mix(in oklab, var(--border) 82%, transparent);
+  background: color-mix(in oklab, var(--card) 85%, transparent);
+  box-shadow: 0 10px 24px -20px color-mix(in oklab, var(--foreground) 30%, transparent);
+  backdrop-filter: blur(8px);
+}
+
+.dark .premium-card {
+  background: color-mix(in oklab, var(--card) 64%, transparent);
+}
+
+.hover-lift {
+  transition: transform 180ms ease, box-shadow 180ms ease;
+}
+
+.hover-lift:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 16px 28px -22px color-mix(in oklab, var(--primary) 45%, transparent);
+}
+
+.text-balance {
+  text-wrap: balance;
+}
+

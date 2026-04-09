@@ -40,7 +40,11 @@ from . import config, llm
 from .combined_prompt import (
     build_combined_system_prompt,
     build_combined_user_prompt,
+    extract_embeddable_html_document,
+    finalize_widget_schema_json,
+    is_social_or_greeting_turn,
     parse_combined_output,
+    widget_schema_json_is_valid,
 )
 from .engine import engine, USERB_ID
 from .auth import (
@@ -61,6 +65,15 @@ from .utils import (
     negative_strength,
 )
 from .widget_prompt import estimate_widget_height, inject_design_system
+
+
+def _maybe_enforce_primitive(user_message: str, strategy: str, response: str) -> str:
+    """Apply strict format except for short greeting/thanks-only turns (prompt already relaxes those)."""
+    if not config.STRICT_PRIMITIVES or not response:
+        return response
+    if is_social_or_greeting_turn(user_message):
+        return response
+    return enforce_response(strategy, response)
 
 
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -114,8 +127,17 @@ def sse_pack(evt: dict) -> str:
     return f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
 
 
-def _parse_streamed_response(chunks) -> Generator[Tuple[str, ...], None, None]:
-    """Parse streaming LLM output, yielding ('response_delta', str) + ('complete', response_text, widget_raw)."""
+def _parse_streamed_response(
+    chunks, *, emit_raw_response_deltas: bool = True
+) -> Generator[Tuple[str, ...], None, None]:
+    """Parse streaming LLM output.
+
+    Events:
+    - ('response_delta', str) — raw token deltas inside <RESPONSE> (if emit_raw_response_deltas).
+    - ('response_closed', str) — full text inside <RESPONSE>...</RESPONSE> (yielded before <WIDGET> finishes).
+    - ('complete', str, str) — final response_text and widget_raw (after </WIDGET> or EOF).
+    If emit_raw_response_deltas is False, buffer <RESPONSE> until </RESPONSE>; caller streams enforced text.
+    """
     buffer = ""
     state = "preamble"  # preamble | response | widget
     response_sent_len = 0
@@ -144,17 +166,19 @@ def _parse_streamed_response(chunks) -> Generator[Tuple[str, ...], None, None]:
             if response_end_tag.upper() in buf_upper:
                 end_idx = buf_upper.find(response_end_tag.upper())
                 to_send = buffer[:end_idx][response_sent_len:]
-                if to_send:
+                if to_send and emit_raw_response_deltas:
                     yield ("response_delta", to_send)
                 response_text = buffer[:end_idx].strip()
                 buffer = buffer[end_idx + len(response_end_tag) :]
                 buf_upper = buffer.upper()
                 state = "widget_looking"
+                yield ("response_closed", response_text)
             else:
                 safe_len = max(0, len(buffer) - tag_max_len)
                 if safe_len > response_sent_len:
                     to_send = buffer[response_sent_len:safe_len]
-                    yield ("response_delta", to_send)
+                    if emit_raw_response_deltas:
+                        yield ("response_delta", to_send)
                     response_sent_len = safe_len
 
         if state == "widget_looking":
@@ -174,13 +198,13 @@ def _parse_streamed_response(chunks) -> Generator[Tuple[str, ...], None, None]:
     # Stream ended without full parse - yield what we have
     if state == "response" and buffer:
         remaining = buffer[response_sent_len:]
-        if remaining:
+        if remaining and emit_raw_response_deltas:
             yield ("response_delta", remaining)
         response_text = buffer
     elif state == "preamble" and buffer.strip():
         # Model didn't use XML tags (e.g. returns "6" for "2*3") - treat raw as response.
         response_text = buffer.strip()
-        if response_text:
+        if response_text and emit_raw_response_deltas:
             yield ("response_delta", response_text)
     widget_raw = buffer if state == "widget" else ""
     yield ("complete", response_text, widget_raw)
@@ -202,6 +226,29 @@ def _looks_truncated_widget_html(html: str) -> bool:
     if re.search(r"[<{(]$", html.strip()):
         return True
     return False
+
+
+def _dispatch_json_mode_widget(widget_payload_raw: str) -> tuple[str, str, int, str]:
+    """
+    Prefer a valid JSON schema for the Vue renderer. If the model returned HTML/JS instead
+    (common for sliders/calculators), fall back to iframe HTML.
+
+    Returns:
+        (widget_schema, widget_html, widget_height, widget_debug_tag)
+    """
+    raw = (widget_payload_raw or "").strip()
+    if not raw:
+        return "", "", 0, ""
+    finalized = finalize_widget_schema_json(raw)
+    if widget_schema_json_is_valid(finalized):
+        return finalized, "", 0, "json_schema_ok"
+    doc = extract_embeddable_html_document(raw)
+    if doc:
+        full = inject_design_system(doc)
+        if _looks_truncated_widget_html(full):
+            return finalized, "", 0, "json_html_fallback_truncated"
+        return "", full, estimate_widget_height(full), "json_html_fallback"
+    return finalized, "", 0, "json_schema_invalid"
 
 
 def _should_generate_widget(message: str) -> bool:
@@ -971,6 +1018,7 @@ def _post_done_payload(
     explicit: bool,
     force_explore: bool,
     instruction: str,
+    format_rule: str,
     elapsed: float | None,
     mode: str,
     scores: dict,
@@ -993,6 +1041,7 @@ def _post_done_payload(
         "explicit": explicit,
         "force_explore": force_explore,
         "instruction": instruction,
+        "format_rule": format_rule,
         "elapsed": elapsed,
         "llm_mode": mode,
         "scores": {k: round(v, 4) for k, v in scores.items()},
@@ -1092,8 +1141,7 @@ def chat(req: ChatReq, user_id: str = Depends(require_user_id)):
     response, widget_payload_raw = parse_combined_output(raw_combined)
     if not response:
         response = raw_combined.strip()
-    if config.STRICT_PRIMITIVES:
-        response = enforce_response(strat, response)
+    response = _maybe_enforce_primitive(msg, strat, response)
 
     widget_html = ""
     widget_schema = ""
@@ -1104,8 +1152,9 @@ def chat(req: ChatReq, user_id: str = Depends(require_user_id)):
 
     if widget_payload_raw:
         if widget_mode == "json":
-            widget_schema = widget_payload_raw
-            widget_debug = widget_debug or "combined_schema_ok"
+            widget_schema, widget_html, widget_height, tag = _dispatch_json_mode_widget(widget_payload_raw)
+            if tag:
+                widget_debug = widget_debug or tag
         else:
             if _looks_truncated_widget_html(widget_payload_raw):
                 widget_debug = "combined_widget_truncated"
@@ -1140,6 +1189,7 @@ def chat(req: ChatReq, user_id: str = Depends(require_user_id)):
         explicit=explicit,
         force_explore=force_explore and (explicit is None),
         instruction=config.STRATEGIES[strat],
+        format_rule=format_rule,
         elapsed=elapsed,
         mode=mode,
         scores=scores,
@@ -1240,6 +1290,7 @@ def chat_stream(req: ChatReq, user_id: str = Depends(require_user_id)):
                 "type": "strategy",
                 "strategy": strat,
                 "instruction": config.STRATEGIES[strat],
+                "format_rule": format_rule,
                 "elapsed": None,
                 "force_explore": force_explore,
                 "scores": {k: round(v, 4) for k, v in scores.items()},
@@ -1273,13 +1324,14 @@ def chat_stream(req: ChatReq, user_id: str = Depends(require_user_id)):
                 response, widget_payload_raw = parse_combined_output(raw_combined)
                 if not response:
                     response = raw_combined.strip()
-                if config.STRICT_PRIMITIVES:
-                    response = enforce_response(strat, response)
+                response = _maybe_enforce_primitive(msg, strat, response)
 
                 if widget_payload_raw:
                     if widget_mode == "json":
-                        widget_schema = widget_payload_raw
-                        widget_debug = "combined_schema_ok"
+                        widget_schema, widget_html, widget_height, tag = _dispatch_json_mode_widget(
+                            widget_payload_raw
+                        )
+                        widget_debug = tag
                     else:
                         if _looks_truncated_widget_html(widget_payload_raw):
                             widget_debug = "combined_widget_truncated"
@@ -1316,27 +1368,43 @@ def chat_stream(req: ChatReq, user_id: str = Depends(require_user_id)):
                 )
                 response = ""
                 widget_payload_raw = ""
-                for event_type, *args in _parse_streamed_response(stream):
+                response_done = False
+                emit_raw = not (config.STRICT_PRIMITIVES and not is_social_or_greeting_turn(msg))
+                for event_type, *args in _parse_streamed_response(stream, emit_raw_response_deltas=emit_raw):
                     if event_type == "response_delta":
                         yield sse_pack({"type": "response_delta", "delta": args[0]})
+                    elif event_type == "response_closed":
+                        response_done = True
+                        response = _maybe_enforce_primitive(msg, strat, args[0])
+                        if not emit_raw:
+                            for i in range(0, len(response), 180):
+                                yield sse_pack({"type": "response_delta", "delta": response[i : i + 180]})
+                        yield sse_pack({"type": "widget_start"})
                     elif event_type == "complete":
-                        response, widget_payload_raw = args[0], args[1]
+                        if not response_done:
+                            response = _maybe_enforce_primitive(msg, strat, args[0])
+                            if not emit_raw:
+                                for i in range(0, len(response), 180):
+                                    yield sse_pack({"type": "response_delta", "delta": response[i : i + 180]})
+                            yield sse_pack({"type": "widget_start"})
+                        widget_payload_raw = args[1]
                         break
                 elapsed_out = round(time.time() - t0, 1)
                 mode = "anthropic"
 
                 if not response and not widget_payload_raw:
                     response = "(No content)"
-                if config.STRICT_PRIMITIVES and response:
-                    response = enforce_response(strat, response)
 
                 if widget_payload_raw:
                     if widget_mode == "json":
-                        widget_schema = widget_payload_raw
+                        widget_schema, widget_html, widget_height, tag = _dispatch_json_mode_widget(
+                            widget_payload_raw
+                        )
+                        widget_debug = tag
                     else:
                         raw_widget = widget_payload_raw
                         if "```" in raw_widget:
-                            fence = re.search(r"```(?:json|html)?\\s*(.*?)```", raw_widget, re.DOTALL | re.IGNORECASE)
+                            fence = re.search(r"```(?:json|html)?\s*(.*?)```", raw_widget, re.DOTALL | re.IGNORECASE)
                             raw_widget = fence.group(1).strip() if fence else re.sub(r"```\w*", "", raw_widget).strip()
                         if "<" in raw_widget and ">" in raw_widget:
                             if "<html" not in raw_widget.lower():
@@ -1351,13 +1419,6 @@ def chat_stream(req: ChatReq, user_id: str = Depends(require_user_id)):
                 if widget_mode != "json" and not widget_html:
                     widget_debug = "no_widget"
 
-                # In anthropic mode we don't stream widget chunks yet, so
-                # at least notify the UI that widget is being produced.
-                if widget_mode == "json" and widget_schema:
-                    yield sse_pack({"type": "widget_start"})
-                elif widget_mode != "json" and widget_html:
-                    yield sse_pack({"type": "widget_start"})
-
             else:
                 raise RuntimeError("Unsupported ADAPTIVE_LLM_MODE (expected openai_compat or anthropic)")
 
@@ -1367,6 +1428,7 @@ def chat_stream(req: ChatReq, user_id: str = Depends(require_user_id)):
                 {
                     "type": "done",
                     "strategy": strat,
+                    "format_rule": format_rule,
                     "elapsed": None,
                     "llm_mode": mode,
                     "response": "",
@@ -1418,6 +1480,7 @@ def chat_stream(req: ChatReq, user_id: str = Depends(require_user_id)):
             {
                 "type": "done",
                 "strategy": strat,
+                "format_rule": format_rule,
                 "elapsed": elapsed_out,
                 "llm_mode": mode,
                 "response": response,
@@ -1555,7 +1618,11 @@ from .widget_prompt import (
 from .combined_prompt import (
     build_combined_system_prompt,
     build_combined_user_prompt,
+    extract_embeddable_html_document,
+    finalize_widget_schema_json,
+    is_social_or_greeting_turn,
     parse_combined_output,
+    widget_schema_json_is_valid,
 )
 from .utils import (
     fast_valence,
@@ -1563,102 +1630,6 @@ from .utils import (
     detect_explore_trigger,
     negative_strength,
 )
-
-def _parse_streamed_response(chunks):
-    """Parse streaming LLM output, yielding (response_delta, ...) and collecting widget.
-
-    Yields:
-        ("response_delta", str) - text to stream to user
-        ("complete", response_text, widget_raw) - when fully parsed
-    """
-    buffer = ""
-    state = "preamble"  # preamble | response | widget
-    response_sent_len = 0
-    response_text = ""
-    response_end_tag = "</RESPONSE>"
-    response_start_tag = "<RESPONSE>"
-    widget_start_tag = "<WIDGET>"
-    widget_end_tag = "</WIDGET>"
-    tag_max_len = max(len(response_end_tag), len(widget_end_tag))
-
-    for chunk in chunks:
-        if not chunk:
-            continue
-        buffer += chunk
-        buf_upper = buffer.upper()
-
-        if state == "preamble":
-            if response_start_tag.upper() in buf_upper:
-                idx = buf_upper.find(response_start_tag.upper()) + len(response_start_tag)
-                buffer = buffer[idx:]
-                buf_upper = buffer.upper()
-                state = "response"
-                response_sent_len = 0
-
-        if state == "response":
-            if response_end_tag.upper() in buf_upper:
-                end_idx = buf_upper.find(response_end_tag.upper())
-                to_send = buffer[:end_idx][response_sent_len:]
-                if to_send:
-                    yield ("response_delta", to_send)
-                response_text = buffer[:end_idx].strip()
-                buffer = buffer[end_idx + len(response_end_tag):]
-                buf_upper = buffer.upper()
-                state = "widget_looking"
-            else:
-                safe_len = max(0, len(buffer) - tag_max_len)
-                if safe_len > response_sent_len:
-                    to_send = buffer[response_sent_len:safe_len]
-                    yield ("response_delta", to_send)
-                    response_sent_len = safe_len
-
-        if state == "widget_looking":
-            if widget_start_tag.upper() in buf_upper:
-                idx = buf_upper.find(widget_start_tag.upper()) + len(widget_start_tag)
-                buffer = buffer[idx:]
-                buf_upper = buffer.upper()
-                state = "widget"
-
-        if state == "widget":
-            if widget_end_tag.upper() in buf_upper:
-                end_idx = buf_upper.find(widget_end_tag.upper())
-                widget_raw = buffer[:end_idx].strip()
-                yield ("complete", response_text, widget_raw)
-                return
-
-    # Stream ended without full parse - yield what we have
-    if state == "response" and buffer:
-        remaining = buffer[response_sent_len:]
-        if remaining:
-            yield ("response_delta", remaining)
-        response_text = buffer
-    elif state == "preamble" and buffer.strip():
-        # Model didn't use XML tags (e.g. "6" for "what is 2*3") - use raw output as response
-        response_text = buffer.strip()
-        if response_text:
-            yield ("response_delta", response_text)
-    widget_raw = buffer if state == "widget" else ""
-    yield ("complete", response_text, widget_raw)
-
-
-def _looks_truncated_widget_html(html: str) -> bool:
-    """Heuristic check for obviously cut-off widget HTML."""
-    if not html:
-        return True
-    lower = html.lower()
-    # Missing critical closures often indicates token truncation.
-    if lower.count("<style") > lower.count("</style>"):
-        return True
-    if lower.count("<script") > lower.count("</script>"):
-        return True
-    if lower.count("<body") > lower.count("</body>"):
-        return True
-    if lower.count("<html") > lower.count("</html>"):
-        return True
-    # Rarely, response ends mid-token; catch abrupt ending.
-    if re.search(r"[<{(]$", html.strip()):
-        return True
-    return False
 
 
 def _bool_env(name: str, default: bool) -> bool:
@@ -1878,8 +1849,7 @@ class Handler(BaseHTTPRequestHandler):
             response, widget_payload_raw = parse_combined_output(raw_combined)
             if not response:
                 response = raw_combined.strip()
-            if config.STRICT_PRIMITIVES:
-                response = enforce_response(strat, response)
+            response = _maybe_enforce_primitive(msg, strat, response)
             widget_html = ""
             widget_schema = ""
             widget_height = 0
@@ -1889,8 +1859,9 @@ class Handler(BaseHTTPRequestHandler):
 
             if widget_payload_raw:
                 if widget_mode == "json":
-                    widget_schema = widget_payload_raw
-                    widget_debug = widget_debug or "combined_schema_ok"
+                    widget_schema, widget_html, widget_height, tag = _dispatch_json_mode_widget(widget_payload_raw)
+                    if tag:
+                        widget_debug = widget_debug or tag
                 else:
                     if _looks_truncated_widget_html(widget_payload_raw):
                         widget_debug = "combined_widget_truncated"
@@ -2100,8 +2071,7 @@ class Handler(BaseHTTPRequestHandler):
                     response, widget_payload_raw = parse_combined_output(raw_combined)
                     if not response:
                         response = raw_combined.strip()
-                    if config.STRICT_PRIMITIVES:
-                        response = enforce_response(strat, response)
+                    response = _maybe_enforce_primitive(msg, strat, response)
                     widget_mode = getattr(config, "WIDGET_MODE", "json").strip().lower()
                     widget_html = ""
                     widget_schema = ""
@@ -2109,7 +2079,10 @@ class Handler(BaseHTTPRequestHandler):
                     widget_debug = "nonstream"
                     if widget_payload_raw:
                         if widget_mode == "json":
-                            widget_schema = widget_payload_raw
+                            widget_schema, widget_html, widget_height, tag = _dispatch_json_mode_widget(
+                                widget_payload_raw
+                            )
+                            widget_debug = tag
                         else:
                             if _looks_truncated_widget_html(widget_payload_raw):
                                 widget_debug = "stream_widget_truncated"
@@ -2124,7 +2097,11 @@ class Handler(BaseHTTPRequestHandler):
                             widget_debug = "fallback_widget_generated"
                     for i in range(0, len(response), 180):
                         send_nd({"type": "response_delta", "delta": response[i : i + 180]})
-                    payload = widget_schema if (widget_mode == "json" and widget_schema) else widget_html
+                    payload = (
+                        widget_schema
+                        if (widget_mode == "json" and widget_schema)
+                        else widget_html
+                    )
                     if payload:
                         for i in range(0, len(payload), 900):
                             send_nd({"type": "widget_delta", "delta": payload[i : i + 900]})
@@ -2138,18 +2115,31 @@ class Handler(BaseHTTPRequestHandler):
                     )
                     response = ""
                     widget_payload_raw = ""
-                    for event_type, *args in _parse_streamed_response(stream):
+                    response_done = False
+                    emit_raw = not (config.STRICT_PRIMITIVES and not is_social_or_greeting_turn(msg))
+                    for event_type, *args in _parse_streamed_response(stream, emit_raw_response_deltas=emit_raw):
                         if event_type == "response_delta":
                             send_nd({"type": "response_delta", "delta": args[0]})
+                        elif event_type == "response_closed":
+                            response_done = True
+                            response = _maybe_enforce_primitive(msg, strat, args[0])
+                            if not emit_raw:
+                                for i in range(0, len(response), 180):
+                                    send_nd({"type": "response_delta", "delta": response[i : i + 180]})
+                            send_nd({"type": "widget_start"})
                         elif event_type == "complete":
-                            response, widget_payload_raw = args[0], args[1]
+                            if not response_done:
+                                response = _maybe_enforce_primitive(msg, strat, args[0])
+                                if not emit_raw:
+                                    for i in range(0, len(response), 180):
+                                        send_nd({"type": "response_delta", "delta": response[i : i + 180]})
+                                send_nd({"type": "widget_start"})
+                            widget_payload_raw = args[1]
                             break
                     elapsed = round(time.time() - t0, 1)
                     mode = "anthropic"
                     if not response and not widget_payload_raw:
                         response = "(No content)"
-                    if config.STRICT_PRIMITIVES and response:
-                        response = enforce_response(strat, response)
                     widget_mode = getattr(config, "WIDGET_MODE", "json").strip().lower()
                     widget_html = ""
                     widget_schema = ""
@@ -2157,7 +2147,10 @@ class Handler(BaseHTTPRequestHandler):
                     widget_debug = "streamed"
                     if widget_payload_raw:
                         if widget_mode == "json":
-                            widget_schema = widget_payload_raw
+                            widget_schema, widget_html, widget_height, tag = _dispatch_json_mode_widget(
+                                widget_payload_raw
+                            )
+                            widget_debug = tag
                         else:
                             raw_widget = widget_payload_raw
                             if "```" in raw_widget:
