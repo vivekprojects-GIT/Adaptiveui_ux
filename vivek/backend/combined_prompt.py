@@ -244,8 +244,14 @@ WIDGET JSON SCHEMA MODE (WIDGET_MODE=json):
     { "type": "text", "id": "...", "content": "..." }
   - kpi_row:
     { "type": "kpi_row", "id": "...", "items": [ { "label": "...", "value": "...", "tone": "positive|neutral|negative" }, ... ] }
-  - chart:
-    { "type": "chart", "id": "...", "title": "...", "chart": { "kind": "line|bar", "x_label": "...", "y_label": "...", "series": [ { "name": "...", "color": "blue|orange|green|red|purple", "values": [ [x, y], ... ] }, ... ] } }
+  - chart (pick "kind" to fit the data; ONLY these kinds render):
+    - line | bar | area | scatter  -> use "series" with [x, y] number pairs:
+      { "type": "chart", "id": "...", "title": "...", "chart": { "kind": "line|bar|area|scatter", "x_label": "...", "y_label": "...", "series": [ { "name": "...", "color": "blue|orange|green|red|purple", "values": [ [x, y], ... ] }, ... ] } }
+    - heatmap (correlation matrix, confusion matrix, any grid of values) -> use labels + a 2D "matrix" (rows = y_labels, cols = x_labels):
+      { "type": "chart", "id": "...", "title": "...", "chart": { "kind": "heatmap", "x_labels": ["A","B",...], "y_labels": ["A","B",...], "matrix": [ [1, 0.3, ...], [0.3, 1, ...], ... ] } }
+    - pie | donut (composition / share of a whole) -> use "items":
+      { "type": "chart", "id": "...", "title": "...", "chart": { "kind": "pie|donut", "items": [ { "label": "...", "value": 42 }, ... ] } }
+    Do NOT invent other kinds. For a correlation matrix you MUST use kind "heatmap" with "matrix" (never a line/bar series).
   - table:
     { "type": "table", "id": "...", "title": "...", "columns": [ ... ], "rows": [ [ ... ], ... ] }
   - action_row:
