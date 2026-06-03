@@ -7,7 +7,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 import numpy as np
-from sqlalchemy import Column, Integer, LargeBinary, String, Text, create_engine, func, select
+from sqlalchemy import Column, Integer, LargeBinary, String, Text, create_engine, func, select, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 from . import config
@@ -67,6 +67,10 @@ class ConversationLogRow(Base):
     elapsed = Column(String, nullable=True)
     widget = Column(Integer, nullable=False, default=0)
     ts = Column(Integer, nullable=False, default=0)
+    # Persisted widget payload so SPA reload can restore interactive widgets.
+    widget_html = Column(Text, nullable=False, default="")
+    widget_schema = Column(Text, nullable=False, default="")
+    widget_height = Column(Integer, nullable=False, default=0)
 
 
 class UserPrimitiveRow(Base):
@@ -142,6 +146,7 @@ def get_engine():
 def init_db() -> None:
     eng = get_engine()
     Base.metadata.create_all(bind=eng)
+    _migrate_conversation_log_widget_columns()
 
     # Ensure bandit_global exists so we can upsert cleanly later.
     Session = _SessionLocal
@@ -165,6 +170,31 @@ def init_db() -> None:
             session.commit()
 
 
+def _migrate_conversation_log_widget_columns() -> None:
+    """SQLite: add widget payload columns to existing DBs (create_all does not ALTER)."""
+    eng = get_engine()
+    with eng.connect() as conn:
+        rows = conn.execute(text("PRAGMA table_info(conversation_logs)")).fetchall()
+        colnames = {str(r[1]) for r in rows}
+        stmts: list[str] = []
+        if "widget_html" not in colnames:
+            stmts.append(
+                "ALTER TABLE conversation_logs ADD COLUMN widget_html TEXT NOT NULL DEFAULT ''"
+            )
+        if "widget_schema" not in colnames:
+            stmts.append(
+                "ALTER TABLE conversation_logs ADD COLUMN widget_schema TEXT NOT NULL DEFAULT ''"
+            )
+        if "widget_height" not in colnames:
+            stmts.append(
+                "ALTER TABLE conversation_logs ADD COLUMN widget_height INTEGER NOT NULL DEFAULT 0"
+            )
+        for s in stmts:
+            conn.execute(text(s))
+        if stmts:
+            conn.commit()
+
+
 def log_conversation_message(
     *,
     user_id: str,
@@ -174,6 +204,9 @@ def log_conversation_message(
     strategy: str | None = None,
     elapsed: float | None = None,
     widget: bool = False,
+    widget_html: str = "",
+    widget_schema: str = "",
+    widget_height: int = 0,
     ts: int | None = None,
 ) -> None:
     Session = _SessionLocal
@@ -190,6 +223,9 @@ def log_conversation_message(
                 elapsed=str(elapsed) if elapsed is not None else None,
                 widget=1 if widget else 0,
                 ts=now,
+                widget_html=str(widget_html or ""),
+                widget_schema=str(widget_schema or ""),
+                widget_height=int(widget_height or 0),
             )
         )
         session.commit()
@@ -220,6 +256,9 @@ def get_recent_conversation_messages(*, user_id: str, pane: str, limit: int = 80
                 "elapsed": r.elapsed,
                 "widget": bool(r.widget),
                 "ts": r.ts,
+                "widget_html": getattr(r, "widget_html", None) or "",
+                "widget_schema": getattr(r, "widget_schema", None) or "",
+                "widget_height": int(getattr(r, "widget_height", None) or 0),
             }
             for r in rows
         ]

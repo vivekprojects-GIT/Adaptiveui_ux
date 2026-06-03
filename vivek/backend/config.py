@@ -32,8 +32,9 @@ ADAPTIVE_LLM_MODE = os.getenv("ADAPTIVE_LLM_MODE", LLM_MODE).lower()
 WIDGET_MODE = os.getenv("WIDGET_MODE", "json").strip().lower()
 
 # Max time (sec) and tokens for combined response+widget generation.
-COMBINED_TIMEOUT_SECONDS = int(os.getenv("COMBINED_TIMEOUT_SECONDS", "30"))
-COMBINED_MAX_TOKENS = int(os.getenv("COMBINED_MAX_TOKENS", "2800"))
+# Tight defaults so latency stays predictable; raise only when the UI shows truncation.
+COMBINED_TIMEOUT_SECONDS = int(os.getenv("COMBINED_TIMEOUT_SECONDS", "45"))
+COMBINED_MAX_TOKENS = int(os.getenv("COMBINED_MAX_TOKENS", "4000"))
 
 # OpenAI-compatible API (Groq, OpenAI, or any chat/completions provider)
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1")

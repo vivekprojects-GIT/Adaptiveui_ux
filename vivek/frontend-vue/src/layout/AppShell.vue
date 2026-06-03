@@ -25,6 +25,7 @@ import {
   InformationCircleIcon,
   RocketLaunchIcon,
   SparklesIcon,
+  TrashIcon,
 } from '@/components/icons'
 
 const route = useRoute()
@@ -87,7 +88,9 @@ function toggleDesktopNav() {
   collapseNav.value = !collapseNav.value
 }
 
-function emitChatControl(action: 'toggle-baseline' | 'toggle-insights' | 'open-preferences' | 'reset') {
+function emitChatControl(
+  action: 'toggle-baseline' | 'toggle-insights' | 'open-preferences' | 'clear-chat' | 'reset',
+) {
   window.dispatchEvent(new CustomEvent('chat:control', { detail: { action } }))
 }
 
@@ -209,9 +212,17 @@ onMounted(async () => {
               type="button"
               class="rounded-lg px-3 py-2 text-sm font-medium transition-all duration-200 flex items-center hover:bg-accent/10 hover:text-foreground hover:-translate-y-0.5 hover:shadow-sm text-muted-foreground w-full"
               :class="collapseNav ? 'justify-center' : 'gap-2'"
+              @click="emitChatControl('clear-chat')"
+            >
+              <TrashIcon class="h-4 w-4 shrink-0" /><span v-if="!collapseNav">Clear chat</span>
+            </button>
+            <button
+              type="button"
+              class="rounded-lg px-3 py-2 text-sm font-medium transition-all duration-200 flex items-center hover:bg-accent/10 hover:text-foreground hover:-translate-y-0.5 hover:shadow-sm text-muted-foreground w-full"
+              :class="collapseNav ? 'justify-center' : 'gap-2'"
               @click="emitChatControl('reset')"
             >
-              <ArrowPathIcon class="h-4 w-4 shrink-0" /><span v-if="!collapseNav">Reset</span>
+              <ArrowPathIcon class="h-4 w-4 shrink-0" /><span v-if="!collapseNav">Reset session</span>
             </button>
           </template>
           <button
@@ -269,8 +280,11 @@ onMounted(async () => {
             <Button variant="outline" type="button" class="h-9 w-full justify-start" @click="emitChatControl('open-preferences')">
               Preferences
             </Button>
+            <Button variant="outline" type="button" class="h-9 w-full justify-start" @click="emitChatControl('clear-chat')">
+              Clear chat
+            </Button>
             <Button variant="outline" type="button" class="h-9 w-full justify-start" @click="emitChatControl('reset')">
-              Reset
+              Reset session
             </Button>
           </template>
           <Button variant="outline" type="button" class="h-9 w-full justify-start" @click="cycleTheme">

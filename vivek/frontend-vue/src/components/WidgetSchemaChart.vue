@@ -63,6 +63,8 @@ function buildOption() {
   const legendNames = seriesList.map((s) => s.name)
 
   return {
+    animation: true,
+    animationDuration: 1100,
     backgroundColor: 'transparent',
     textStyle: {
       color: '#64748b',
@@ -131,7 +133,9 @@ watch(
 </script>
 
 <template>
-  <div class="wsc-root rounded-xl border bg-card overflow-hidden shadow-sm">
+  <div
+    class="wsc-root rounded-xl border bg-card overflow-hidden shadow-sm transition-shadow duration-300 hover:shadow-md"
+  >
     <div v-if="title" class="px-3 py-2 border-b text-xs font-medium">{{ title }}</div>
     <div ref="rootEl" class="w-full h-[min(360px,52vh)] min-h-[220px]" />
   </div>

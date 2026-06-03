@@ -8,7 +8,9 @@ import Button from '@/components/ui/Button.vue'
 import PreferenceModal from '@/components/PreferenceModal.vue'
 import TechPanels from '@/components/TechPanels.vue'
 import WidgetSchemaRenderer from '@/components/WidgetSchemaRenderer.vue'
-import { getAccessToken } from '@/lib/auth'
+import LiveWidgetSchema from '@/components/LiveWidgetSchema.vue'
+import LiveWidgetFrame from '@/components/LiveWidgetFrame.vue'
+import { getAccessToken, clearAccessToken } from '@/lib/auth'
 import { ingestDone, ingestReward } from '@/lib/analyticsStore'
 import {
   applyPosteriorPack,
@@ -21,9 +23,102 @@ import { type PosteriorMap } from '@/lib/strategies'
 import { getStrategyLabel } from '@/lib/strategiesStore'
 import { renderAssistantMarkdown } from '@/lib/renderMarkdown'
 import { MOTION_BASE, animatePulse, killAnimationsOf } from '@/lib/motion'
+import { downloadTextAsFile, prettifyJsonIfPossible } from '@/lib/downloadFile'
+import { ArrowDownTrayIcon } from '@/components/icons'
 
 const router = useRouter()
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5051'
+
+/** FastAPI uses `detail`; our API uses `error` — normalize for user-visible messages. */
+function formatApiErrorBody(d: Record<string, unknown>, fallback: string): string {
+  const err = d.error
+  if (typeof err === 'string' && err.trim()) return err.trim()
+  const det = d.detail
+  if (typeof det === 'string' && det.trim()) return det.trim()
+  if (Array.isArray(det)) {
+    const parts = det
+      .map((item) => {
+        if (item && typeof item === 'object' && 'msg' in item) {
+          return String((item as { msg?: string }).msg || '').trim()
+        }
+        return ''
+      })
+      .filter(Boolean)
+    if (parts.length) return parts.join('; ')
+  }
+  return fallback
+}
+
+async function readJsonWithFallback(res: Response): Promise<Record<string, unknown>> {
+  const text = await res.text().catch(() => '')
+  if (!text.trim()) return {}
+  try {
+    return JSON.parse(text) as Record<string, unknown>
+  } catch {
+    return { error: text.slice(0, 400) }
+  }
+}
+
+/** Matches backend `_json_layout_is_only_numeric_index_arrays` (bogus tic-tac-toe "lines" as text). */
+const NUMERIC_TUPLE_TEXT_RE = /^\s*\[\s*\d+(\s*,\s*\d+)*\s*\]\s*$/
+
+function schemaIsOnlyNumericTupleText(wSch: string): boolean {
+  const s = wSch.trim()
+  if (!s.startsWith('{')) return false
+  try {
+    const o = JSON.parse(s) as { layout?: unknown }
+    const layout = o.layout
+    if (!Array.isArray(layout) || layout.length < 2) return false
+    for (const item of layout) {
+      if (!item || typeof item !== 'object') return false
+      const rec = item as Record<string, unknown>
+      if (String(rec.type || '').toLowerCase() !== 'text') return false
+      if (!NUMERIC_TUPLE_TEXT_RE.test(String(rec.content ?? ''))) return false
+    }
+    return true
+  } catch {
+    return false
+  }
+}
+
+function streamLooksLikeSubstantialHtml(s: string): boolean {
+  const low = s.toLowerCase()
+  if (low.includes('<!doctype') || low.includes('<html')) return true
+  return (
+    low.includes('<div') &&
+    (low.includes('<script') || low.includes('onclick=') || low.includes('<button'))
+  )
+}
+
+function extractHtmlDocumentFromStream(s: string): string {
+  const low = s.toLowerCase()
+  const iDoc = low.indexOf('<!doctype')
+  const iHtml = low.indexOf('<html')
+  let i = iDoc >= 0 ? iDoc : iHtml
+  if (i < 0) {
+    const div = low.indexOf('<div')
+    if (div < 0) return ''
+    i = div
+  }
+  const end = low.lastIndexOf('</html>')
+  if (end >= i && end >= 0) return s.slice(i, end + '</html>'.length)
+  return s.slice(i)
+}
+
+/** Drop useless index-array "widgets"; pull real HTML from the raw stream if the model mixed outputs. */
+function recoverWidgetFromStreamIfDegenerate(cur: ChatMessage) {
+  const stream = String(cur.widgetStream || '').trim()
+  const sch = String(cur.widgetSchema || '').trim()
+  if (!schemaIsOnlyNumericTupleText(sch)) return
+  cur.widgetSchema = ''
+  if (String(cur.widgetHtml || '').trim()) return
+  if (!stream || !streamLooksLikeSubstantialHtml(stream)) return
+  const html = extractHtmlDocumentFromStream(stream).trim()
+  if (html) {
+    cur.widgetHtml = html
+    cur.widgetMode = 'html'
+  }
+}
 
 const isStreaming = ref(false)
 const streamStatus = ref('')
@@ -39,8 +134,36 @@ type ChatMessage = {
   widgetHtml?: string
   widgetSchema?: string
   widgetHeight?: number
+  widgetStream?: string
+  widgetStreaming?: boolean
+  widgetMode?: 'json' | 'html' | ''
   rewardUsedUp?: boolean
   rewardUsedDown?: boolean
+}
+
+/** Successful `/api/chat` JSON (after error checks). */
+type ChatApiSuccess = {
+  response?: string
+  strategy?: string
+  x_vec?: unknown[]
+  widget_html?: string
+  widget_schema?: string
+  widget_height?: number
+  instruction?: string
+  scores?: Record<string, number> | null
+  auto_detected?: boolean
+  auto_r?: number
+  auto_reason?: string
+  elapsed?: number
+  posterior?: PosteriorMap
+  global?: PosteriorMap
+  userb?: PosteriorMap
+  global_n?: number
+}
+
+type ChatPlainSuccess = {
+  response?: string
+  elapsed?: number
 }
 
 const plainMessages = ref<PlainMsg[]>([])
@@ -110,6 +233,21 @@ function authHeaders(): HeadersInit {
   return h
 }
 
+/**
+ * If the server rejects our bearer token, the frontend must clear it and
+ * bounce the user to /login — otherwise every request keeps failing silently
+ * with a generic "request failed" banner.
+ */
+function handleAuthFailure(): boolean {
+  clearAccessToken()
+  showToast({
+    title: 'Session expired',
+    message: 'Please log in again to continue.',
+  })
+  router.push('/login')
+  return true
+}
+
 async function fetchState() {
   const token = getAccessToken()
   if (!token) return
@@ -147,8 +285,30 @@ function openPrefs() {
   prefOpen.value = true
 }
 
+async function onClearChat() {
+  if (!confirm('Clear all messages and widgets? Your bandit learning and reward history stay.')) return
+  const token = getAccessToken()
+  if (!token) {
+    router.push('/login')
+    return
+  }
+  const res = await fetch(`${API_BASE}/api/conversation/clear`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify({}),
+  })
+  if (!res.ok) {
+    showToast({ title: 'Clear failed', message: 'Try again.' })
+    return
+  }
+  plainMessages.value = []
+  messages.value = [{ role: 'assistant', content: 'Chat cleared. Ask anything to begin again.' }]
+  prefOpen.value = false
+  showToast({ title: 'Chat cleared', message: 'Messages and widgets removed; bandit state kept.' })
+}
+
 async function onReset() {
-  if (!confirm('Reset your bandit session? History for this account will be cleared.')) return
+  if (!confirm('Reset your bandit session? History and learning for this account will be cleared.')) return
   const token = getAccessToken()
   if (!token) {
     router.push('/login')
@@ -218,19 +378,24 @@ async function runChatPlain(text: string): Promise<void> {
     headers: authHeaders(),
     body: JSON.stringify({ message: text }),
   })
-  const d = await res.json().catch(() => ({}))
-  if (!res.ok || d.error) {
+  if (res.status === 401) {
+    handleAuthFailure()
+    return
+  }
+  const d = await readJsonWithFallback(res)
+  if (!res.ok || d.error || d.detail) {
     plainMessages.value.push({
       role: 'assistant',
       content: '',
-      error: typeof d.error === 'string' ? d.error : 'Baseline request failed',
+      error: formatApiErrorBody(d, 'Baseline request failed'),
     })
     return
   }
+  const ok = d as ChatPlainSuccess
   plainMessages.value.push({
     role: 'assistant',
-    content: d.response || '',
-    elapsed: d.elapsed,
+    content: ok.response || '',
+    elapsed: typeof ok.elapsed === 'number' ? ok.elapsed : undefined,
   })
   await nextTick()
   if (baselineScrollEl.value && baselineStickToBottom.value) scrollToBottom(baselineScrollEl.value)
@@ -242,37 +407,46 @@ async function runChatFallback(text: string, idx: number): Promise<boolean> {
     headers: authHeaders(),
     body: JSON.stringify({ message: text }),
   })
-  const d = await res.json().catch(() => ({}))
-  if (!res.ok || d.error) {
-    messages.value[idx].content = `⚠ ${typeof d.error === 'string' ? d.error : 'Adaptive request failed'}`
+  if (res.status === 401) {
+    handleAuthFailure()
+    messages.value[idx].content = '⚠ Session expired — redirecting to login.'
     return false
   }
+  const d = await readJsonWithFallback(res)
+  if (!res.ok || d.error || d.detail) {
+    messages.value[idx].content = `⚠ ${formatApiErrorBody(d, `Adaptive request failed (${res.status})`)}`
+    return false
+  }
+  const payload = d as ChatApiSuccess
   const cur = messages.value[idx]
-  cur.content = cleanAssistantText(d.response)
-  cur.strategy = d.strategy
-  cur.xVec = Array.isArray(d.x_vec) ? d.x_vec.map((n: unknown) => Number(n)) : []
-  cur.widgetHtml = typeof d.widget_html === 'string' ? d.widget_html : ''
-  cur.widgetSchema = typeof d.widget_schema === 'string' ? d.widget_schema : ''
-  cur.widgetHeight = d.widget_height ? Number(d.widget_height) : 420
+  cur.content = cleanAssistantText(
+    typeof payload.response === 'string' ? payload.response : String(payload.response ?? ''),
+  )
+  cur.strategy = typeof payload.strategy === 'string' ? payload.strategy : String(payload.strategy ?? '')
+  cur.xVec = Array.isArray(payload.x_vec) ? payload.x_vec.map((n: unknown) => Number(n)) : []
+  cur.widgetHtml = typeof payload.widget_html === 'string' ? payload.widget_html : ''
+  cur.widgetSchema = typeof payload.widget_schema === 'string' ? payload.widget_schema : ''
+  if (schemaIsOnlyNumericTupleText(cur.widgetSchema)) cur.widgetSchema = ''
+  cur.widgetHeight = payload.widget_height ? Number(payload.widget_height) : 420
   cur.rewardUsedUp = false
   cur.rewardUsedDown = false
-  banditState.activeStrategy = d.strategy || ''
-  banditState.activeInstruction = d.instruction || ''
-  banditState.selectedStrategy = d.strategy || ''
-  banditState.scores = d.scores || null
+  banditState.activeStrategy = payload.strategy || ''
+  banditState.activeInstruction = typeof payload.instruction === 'string' ? payload.instruction : ''
+  banditState.selectedStrategy = payload.strategy || ''
+  banditState.scores = payload.scores ?? null
   banditState.lastXVec = cur.xVec ?? null
-  applyPosteriorPack(d)
-  if (d.auto_detected && d.auto_r != null) {
-    const autoReward = Number(d.auto_r)
-    const autoStrategy = String(d.strategy ?? cur.strategy ?? 'unknown')
+  applyPosteriorPack(payload)
+  if (payload.auto_detected && payload.auto_r != null) {
+    const autoReward = Number(payload.auto_r)
+    const autoStrategy = String(payload.strategy ?? cur.strategy ?? 'unknown')
     // Prevent double-counting if the user later submits explicit feedback.
     cur.rewardUsedUp = autoReward === 1
     cur.rewardUsedDown = autoReward === 0
 
     banditState.rewardLog.unshift({
-      strategy: d.strategy,
+      strategy: String(payload.strategy ?? autoStrategy),
       reward: autoReward,
-      detail: String(d.auto_reason || ''),
+      detail: String(payload.auto_reason || ''),
       source: 'auto',
     })
 
@@ -285,9 +459,9 @@ async function runChatFallback(text: string, idx: number): Promise<boolean> {
     })
   }
   ingestDone({
-    strategy: d.strategy ?? 'unknown',
-    elapsed: d.elapsed,
-    widget_html: d.widget_html ?? '',
+    strategy: payload.strategy ?? 'unknown',
+    elapsed: payload.elapsed,
+    widget_html: payload.widget_html ?? '',
   })
   return true
 }
@@ -323,19 +497,33 @@ function handleSseEvent(evt: Record<string, unknown>, idx: number) {
     requestAdaptiveAutoScroll()
   }
 
-  if (evt.type === 'widget_delta') {
-    widgetStreamPhase.value = true
-    streamStatus.value = 'Building interactive widget…'
-    widgetGenerating.value = true
-    widgetGeneratingIdx.value = idx
-  }
-
   if (evt.type === 'widget_start') {
     widgetStreamPhase.value = true
     streamStatus.value = 'Building interactive widget…'
     widgetGenerating.value = true
     widgetGeneratingIdx.value = idx
+    cur.widgetStream = ''
+    cur.widgetStreaming = true
+    cur.widgetMode = ''
     requestAdaptiveAutoScroll()
+  }
+
+  if (evt.type === 'widget_delta') {
+    widgetStreamPhase.value = true
+    streamStatus.value = 'Building interactive widget…'
+    widgetGenerating.value = true
+    widgetGeneratingIdx.value = idx
+    const delta = String((evt as { delta?: string }).delta ?? '')
+    if (delta) {
+      cur.widgetStream = (cur.widgetStream || '') + delta
+      cur.widgetStreaming = true
+      if (!cur.widgetMode) {
+        const preview = cur.widgetStream.slice(0, 400).trim().toLowerCase()
+        if (preview.startsWith('<') || preview.startsWith('<!doctype')) cur.widgetMode = 'html'
+        else if (preview.startsWith('{') || preview.startsWith('[') || preview.startsWith('```json')) cur.widgetMode = 'json'
+      }
+      requestAdaptiveAutoScroll()
+    }
   }
 
   if (evt.type === 'done') {
@@ -367,6 +555,27 @@ function handleSseEvent(evt: Record<string, unknown>, idx: number) {
     cur.widgetHtml = wHtml
     cur.widgetSchema = wSch
     cur.widgetHeight = e.widget_height ? Number(e.widget_height) : 420
+    cur.widgetStreaming = false
+
+    recoverWidgetFromStreamIfDegenerate(cur)
+
+    // If the server omits or clears finalized widget fields but we already streamed
+    // payload into `widgetStream`, promote that stream into the final slot. Otherwise
+    // the live panel hides (widgetStreaming=false) and the final iframe/schema panel
+    // never mounts — looks like the widget "disappeared" after completion.
+    const stream = String(cur.widgetStream || '').trim()
+    if (!cur.widgetHtml && !cur.widgetSchema && stream) {
+      let mode = cur.widgetMode || ''
+      if (!mode) {
+        const preview = stream.slice(0, 400).trim().toLowerCase()
+        if (preview.startsWith('<') || preview.startsWith('<!doctype')) mode = 'html'
+        else if (preview.startsWith('{') || preview.startsWith('[') || preview.startsWith('```json')) mode = 'json'
+      }
+      if (mode === 'html') cur.widgetHtml = stream
+      else if (!schemaIsOnlyNumericTupleText(stream)) cur.widgetSchema = stream
+      if (mode && (cur.widgetHtml || cur.widgetSchema)) cur.widgetMode = mode as 'json' | 'html' | ''
+    }
+    if (!cur.widgetHtml?.trim() && !cur.widgetSchema?.trim()) cur.widgetMode = ''
     cur.xVec = Array.isArray(e.x_vec) ? e.x_vec.map((n) => Number(n)) : []
     cur.rewardUsedUp = false
     cur.rewardUsedDown = false
@@ -444,7 +653,6 @@ async function onSend() {
       })
     : Promise.resolve()
 
-  let widgetStream = ''
   let finalized = false
   let fallbackUsed = false
 
@@ -455,9 +663,22 @@ async function onSend() {
       body: JSON.stringify({ message: text }),
     })
 
+    if (resp.status === 401) {
+      handleAuthFailure()
+      messages.value[idx].content = '⚠ Session expired — redirecting to login.'
+      finalized = true
+      return
+    }
+
     if (!resp.ok) {
-      const errText = await resp.text().catch(() => '')
-      throw new Error(errText || `Request failed (${resp.status})`)
+      if (resp.status === 401) {
+        handleAuthFailure()
+        messages.value[idx].content = '⚠ Session expired — redirecting to login.'
+        finalized = true
+        return
+      }
+      const d = await readJsonWithFallback(resp)
+      throw new Error(formatApiErrorBody(d, `Stream request failed (${resp.status})`))
     }
 
     if (!resp.body) throw new Error('Streaming response missing body')
@@ -490,19 +711,28 @@ async function onSend() {
         }
         if (!evt) continue
 
-        if (evt.type === 'widget_delta' && typeof (evt as { delta?: string }).delta === 'string') {
-          widgetStream += (evt as { delta: string }).delta
-        }
-
         handleSseEvent(evt, idx)
 
         if (evt.type === 'done') {
           finalized = true
           const cur = messages.value[idx]
+          // Redundant safety: promote streamed widget if done payload left both empty.
           const wHtml = typeof (evt as { widget_html?: string }).widget_html === 'string' ? (evt as { widget_html: string }).widget_html.trim() : ''
-          if (!wHtml && widgetStream) {
-            cur.widgetHtml = widgetStream
+          const wSch = typeof (evt as { widget_schema?: string }).widget_schema === 'string' ? (evt as { widget_schema: string }).widget_schema.trim() : ''
+          const stream = String(cur.widgetStream || '').trim()
+          if (!wHtml && !wSch && stream) {
+            let mode = cur.widgetMode || ''
+            if (!mode) {
+              const preview = stream.slice(0, 400).trim().toLowerCase()
+              if (preview.startsWith('<') || preview.startsWith('<!doctype')) mode = 'html'
+              else if (preview.startsWith('{') || preview.startsWith('[') || preview.startsWith('```json')) mode = 'json'
+            }
+            if (mode === 'html') cur.widgetHtml = stream
+            else if (!schemaIsOnlyNumericTupleText(stream)) cur.widgetSchema = stream
+            if (mode && (cur.widgetHtml || cur.widgetSchema)) cur.widgetMode = mode as 'json' | 'html' | ''
           }
+          if (!cur.widgetHtml?.trim() && !cur.widgetSchema?.trim()) cur.widgetMode = ''
+          recoverWidgetFromStreamIfDegenerate(cur)
         }
       }
     }
@@ -535,7 +765,32 @@ async function onSend() {
   }
 }
 
-type HistoryPair = { user: string; assistant: string }
+type HistoryPair = {
+  user: string
+  assistant: string
+  widget_html?: string
+  widget_schema?: string
+  widget_height?: number
+}
+
+function assistantFromHistoryPair(p: HistoryPair): ChatMessage {
+  const wHtml = String(p.widget_html ?? '').trim()
+  const wSch = String(p.widget_schema ?? '').trim()
+  const wh = Number(p.widget_height) || 420
+  const base: ChatMessage = {
+    role: 'assistant',
+    content: cleanAssistantText(p.assistant),
+    widgetHeight: wh,
+  }
+  if (wHtml) {
+    base.widgetHtml = wHtml
+    base.widgetMode = 'html'
+  } else if (wSch && !schemaIsOnlyNumericTupleText(wSch)) {
+    base.widgetSchema = wSch
+    base.widgetMode = 'json'
+  }
+  return base
+}
 
 async function loadConversationHistory() {
   const token = getAccessToken()
@@ -556,7 +811,7 @@ async function loadConversationHistory() {
 
     messages.value = adaptiveHist.flatMap((p) => [
       { role: 'user' as const, content: p.user },
-      { role: 'assistant' as const, content: cleanAssistantText(p.assistant) },
+      assistantFromHistoryPair(p),
     ])
   } catch {
     // Non-blocking: chat still works even if history can't load.
@@ -616,6 +871,10 @@ function onShellControl(e: Event) {
   }
   if (action === 'open-preferences') {
     openPrefs()
+    return
+  }
+  if (action === 'clear-chat') {
+    void onClearChat()
     return
   }
   if (action === 'reset') {
@@ -698,6 +957,52 @@ function widgetFrameHeight(height?: number): number {
   if (!Number.isFinite(raw)) return 420
   return Math.min(Math.max(raw, 300), 520)
 }
+
+function widgetDownloadBase(m: ChatMessage, idx: number): string {
+  const part = (m.strategy || 'adaptive').replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/^-|-$/g, '').slice(0, 32) || 'widget'
+  return `widget-${part}-${idx + 1}`
+}
+
+function downloadWidgetHtml(html: string, base: string) {
+  const body = String(html || '').trim()
+  if (!body) {
+    showToast({ title: 'Nothing to download', message: 'Widget HTML is empty.' })
+    return
+  }
+  downloadTextAsFile(body, `${base}.html`, 'text/html;charset=utf-8')
+}
+
+function downloadWidgetJson(jsonStr: string, base: string) {
+  const body = prettifyJsonIfPossible(String(jsonStr || '').trim())
+  if (!body) {
+    showToast({ title: 'Nothing to download', message: 'Widget JSON is empty.' })
+    return
+  }
+  downloadTextAsFile(body, `${base}.json`, 'application/json;charset=utf-8')
+}
+
+function effectiveStreamWidgetMode(m: ChatMessage): 'html' | 'json' {
+  if (m.widgetMode === 'html') return 'html'
+  if (m.widgetMode === 'json') return 'json'
+  const preview = String(m.widgetStream || '').slice(0, 400).trim().toLowerCase()
+  if (preview.startsWith('<') || preview.startsWith('<!doctype')) return 'html'
+  return 'json'
+}
+
+function downloadLiveWidgetDraft(m: ChatMessage, idx: number) {
+  const stream = String(m.widgetStream || '').trim()
+  if (!stream) {
+    showToast({ title: 'Nothing to download', message: 'Widget is still loading.' })
+    return
+  }
+  const base = `${widgetDownloadBase(m, idx)}-draft`
+  if (effectiveStreamWidgetMode(m) === 'html') downloadWidgetHtml(stream, base)
+  else downloadWidgetJson(stream, base)
+}
+
+function downloadFinalWidgetHtml(m: ChatMessage, idx: number) {
+  downloadWidgetHtml(m.widgetHtml || '', widgetDownloadBase(m, idx))
+}
 </script>
 
 <template>
@@ -765,12 +1070,7 @@ function widgetFrameHeight(height?: number): number {
                 >
                   <div class="text-[10px] text-muted-foreground mb-0.5">Baseline</div>
                   <div v-if="m.error" class="text-red-400 text-sm">⚠ {{ m.error }}</div>
-                  <div
-                    v-else-if="m.role === 'assistant'"
-                    class="assistant-markdown min-w-0 leading-relaxed"
-                    v-html="renderAssistantMarkdown(m.content)"
-                  />
-                  <div v-else class="whitespace-pre-wrap leading-relaxed">{{ m.content }}</div>
+                  <div v-else class="whitespace-pre-wrap leading-relaxed min-w-0">{{ m.content }}</div>
                   <div v-if="m.elapsed != null" class="text-[10px] text-muted-foreground mt-1">{{ m.elapsed }}s</div>
                 </div>
               </div>
@@ -861,33 +1161,94 @@ function widgetFrameHeight(height?: number): number {
               </div>
             </div>
 
-            <!-- Widget loading: only after answer text exists (server sends widget_start after RESPONSE) -->
-            <div
+            <!-- LIVE streaming widget (Claude-style): visible the moment <WIDGET> opens. -->
+            <Motion
               v-if="
                 m.role === 'assistant' &&
-                m.content.trim() &&
-                widgetGenerating &&
-                widgetGeneratingIdx === idx &&
+                m.widgetStreaming &&
                 !m.widgetHtml &&
-                !m.widgetSchema
+                !m.widgetSchema &&
+                (m.widgetStream || (widgetGenerating && widgetGeneratingIdx === idx))
               "
-              class="widget-building-panel mt-2 flex items-center gap-3 rounded-xl border border-cyan-500/30 bg-cyan-500/[0.06] dark:bg-cyan-950/25 px-3 py-2.5 text-xs shadow-sm"
-              role="status"
-              aria-live="polite"
+              tag="div"
+              class="mt-2"
+              :initial="{ opacity: 0, y: 20, scale: 0.98 }"
+              :animate="{ opacity: 1, y: 0, scale: 1 }"
+              :transition="{ ...MOTION_BASE, delay: 0.02 }"
             >
-              <span class="relative flex h-2.5 w-2.5 shrink-0">
-                <span
-                  class="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-60"
-                />
-                <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-cyan-500" />
-              </span>
-              <span class="font-medium text-cyan-900 dark:text-cyan-100">Preparing widget</span>
-              <span class="text-[11px] text-muted-foreground">Charts or controls load next…</span>
-            </div>
+              <div
+                class="rounded-2xl border border-cyan-500/30 bg-card overflow-hidden shadow-sm widget-glow transition-shadow duration-500"
+              >
+                <div class="px-4 py-2 border-b flex items-center justify-between text-xs gap-2">
+                  <div class="flex items-center gap-2 min-w-0">
+                    <span class="relative flex h-2 w-2 shrink-0">
+                      <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-70" />
+                      <span class="relative inline-flex rounded-full h-2 w-2 bg-cyan-500" />
+                    </span>
+                    <span class="font-medium text-cyan-900 dark:text-cyan-100 truncate">Interactive widget</span>
+                    <span class="text-muted-foreground shrink-0 hidden sm:inline">· building live</span>
+                  </div>
+                  <div class="flex items-center gap-2 shrink-0">
+                    <span class="text-[10px] text-muted-foreground font-mono tabular-nums">
+                      {{ ((m.widgetStream || '').length) }} chars
+                    </span>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      class="h-7 px-2"
+                      title="Download current widget draft (.html or .json)"
+                      @click="downloadLiveWidgetDraft(m, idx)"
+                    >
+                      <ArrowDownTrayIcon class="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                </div>
+                <div class="p-3">
+                  <LiveWidgetFrame
+                    v-if="m.widgetMode === 'html'"
+                    :raw-stream="m.widgetStream || ''"
+                    :final-html="m.widgetHtml || ''"
+                    :finalized="!!m.widgetHtml"
+                    :height="widgetFrameHeight(m.widgetHeight)"
+                  />
+                  <LiveWidgetSchema
+                    v-else
+                    :raw-stream="m.widgetStream || ''"
+                    :finalized="false"
+                  />
+                </div>
+              </div>
+            </Motion>
 
-            <div v-if="m.role === 'assistant' && m.widgetHtml && String(m.widgetHtml).trim()" class="mt-2">
-              <div class="rounded-2xl border bg-card overflow-hidden">
-                <div class="px-4 py-2 border-b text-xs text-muted-foreground">Interactive widget</div>
+            <!-- Final widget (HTML iframe mode). -->
+            <Motion
+              v-if="m.role === 'assistant' && m.widgetHtml && String(m.widgetHtml).trim()"
+              tag="div"
+              class="mt-2"
+              :initial="{ opacity: 0, y: 16 }"
+              :animate="{ opacity: 1, y: 0 }"
+              :transition="MOTION_BASE"
+            >
+              <div
+                class="rounded-2xl border bg-card overflow-hidden shadow-sm transition-shadow duration-300 hover:shadow-md"
+              >
+                <div class="px-4 py-2 border-b text-xs text-muted-foreground flex items-center justify-between gap-2">
+                  <div class="flex items-center gap-2 min-w-0">
+                    <span class="h-1.5 w-1.5 rounded-full bg-emerald-500 shrink-0" />
+                    <span class="truncate">Interactive widget</span>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    class="h-7 px-2 shrink-0"
+                    title="Download widget as HTML"
+                    @click="downloadFinalWidgetHtml(m, idx)"
+                  >
+                    <ArrowDownTrayIcon class="h-3.5 w-3.5" />
+                  </Button>
+                </div>
                 <iframe
                   :srcdoc="m.widgetHtml"
                   sandbox="allow-scripts allow-same-origin"
@@ -895,16 +1256,29 @@ function widgetFrameHeight(height?: number): number {
                   :style="{ height: `${widgetFrameHeight(m.widgetHeight)}px`, maxHeight: '56vh' }"
                 />
               </div>
-            </div>
+            </Motion>
 
-            <div v-if="m.role === 'assistant' && m.widgetSchema && String(m.widgetSchema).trim() && !m.widgetHtml" class="mt-2">
-              <div class="rounded-2xl border bg-card overflow-hidden">
-                <div class="px-4 py-2 border-b text-xs text-muted-foreground">Widget (JSON schema)</div>
+            <!-- Final widget (JSON schema mode). -->
+            <Motion
+              v-if="m.role === 'assistant' && m.widgetSchema && String(m.widgetSchema).trim() && !m.widgetHtml"
+              tag="div"
+              class="mt-2"
+              :initial="{ opacity: 0, y: 16 }"
+              :animate="{ opacity: 1, y: 0 }"
+              :transition="MOTION_BASE"
+            >
+              <div
+                class="rounded-2xl border bg-card overflow-hidden shadow-sm transition-shadow duration-300 hover:shadow-md"
+              >
+                <div class="px-4 py-2 border-b text-xs text-muted-foreground flex items-center gap-2">
+                  <span class="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                  Interactive widget
+                </div>
                 <div class="p-4">
-                  <WidgetSchemaRenderer :json-str="m.widgetSchema" />
+                  <WidgetSchemaRenderer :json-str="m.widgetSchema" :download-base="widgetDownloadBase(m, idx)" />
                 </div>
               </div>
-            </div>
+            </Motion>
 
             <div
               v-if="m.role === 'assistant' && m.strategy && Array.isArray(m.xVec) && m.xVec.length"
@@ -1083,17 +1457,17 @@ function widgetFrameHeight(height?: number): number {
   }
 }
 
-.widget-building-panel {
-  animation: widgetPanelBreathe 2.2s ease-in-out infinite;
+.widget-glow {
+  animation: widgetPanelBreathe 1.55s ease-in-out infinite;
 }
 
 @keyframes widgetPanelBreathe {
   0%,
   100% {
-    box-shadow: 0 1px 0 0 rgba(6, 182, 212, 0.12);
+    box-shadow: 0 1px 0 0 rgba(6, 182, 212, 0.14);
   }
   50% {
-    box-shadow: 0 4px 24px -4px rgba(6, 182, 212, 0.25);
+    box-shadow: 0 10px 36px -4px rgba(6, 182, 212, 0.38);
   }
 }
 

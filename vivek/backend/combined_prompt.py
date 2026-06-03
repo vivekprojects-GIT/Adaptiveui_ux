@@ -57,7 +57,82 @@ def parse_widget_schema_object(s: str) -> Any | None:
         return None
 
 
-_BLOCK_TYPES = frozenset({"text", "kpi_row", "chart", "table", "action_row"})
+_BLOCK_TYPES = frozenset({"text", "kpi_row", "chart", "table", "action_row", "image"})
+
+_TYPE_ALIASES: dict[str, str] = {
+    "markdown": "text",
+    "md": "text",
+    "paragraph": "text",
+    "rich_text": "text",
+    "kpi": "kpi_row",
+    "kpis": "kpi_row",
+    "kpirow": "kpi_row",
+    "metrics": "kpi_row",
+    "metric_row": "kpi_row",
+    "data_table": "table",
+    "grid": "table",
+    "actions": "action_row",
+    "action": "action_row",
+    "plot": "chart",
+    "graph": "chart",
+    "line_chart": "chart",
+    "bar_chart": "chart",
+    "photo": "image",
+    "picture": "image",
+    "img": "image",
+    "illustration": "image",
+}
+
+
+def _normalize_layout_block(entry: Any) -> dict[str, Any]:
+    """Turn primitives, malformed entries, and common aliases into valid block dicts."""
+    if entry is None:
+        return {"type": "text", "content": ""}
+    if isinstance(entry, (str, int, float, bool)):
+        return {"type": "text", "content": str(entry)}
+    if isinstance(entry, list):
+        return {"type": "text", "content": json.dumps(entry, ensure_ascii=False)}
+    if not isinstance(entry, dict):
+        return {"type": "text", "content": str(entry)}
+
+    b: dict[str, Any] = dict(entry)
+    raw_t = str(b.get("type") or "").strip().lower().replace("-", "_")
+    t = _TYPE_ALIASES.get(raw_t, raw_t)
+    if t in _BLOCK_TYPES:
+        b["type"] = t
+        return b
+
+    items = b.get("items")
+    if isinstance(items, list) and items:
+        first = items[0]
+        if isinstance(first, dict) and isinstance(first.get("label"), str):
+            v = first.get("value")
+            if isinstance(v, (str, int, float, bool)):
+                b["type"] = "kpi_row"
+                return b
+    if isinstance(b.get("chart"), dict):
+        b["type"] = "chart"
+        return b
+    src_val = b.get("src")
+    if isinstance(src_val, str) and src_val.strip():
+        b["type"] = "image"
+        return b
+    if isinstance(b.get("rows"), list):
+        b["type"] = "table"
+        return b
+    if isinstance(b.get("buttons"), list):
+        b["type"] = "action_row"
+        return b
+    for key in ("content", "body", "text", "markdown", "md"):
+        v = b.get(key)
+        if isinstance(v, str):
+            return {"type": "text", "content": v}
+
+    return {"type": "text", "content": json.dumps(b, ensure_ascii=False)}
+
+
+def _sanitize_layout(layout: list[Any]) -> list[dict[str, Any]]:
+    return [_normalize_layout_block(e) for e in layout]
 
 
 def coerce_widget_schema_root(obj: Any) -> dict[str, Any] | None:
@@ -92,6 +167,8 @@ def coerce_widget_schema_root(obj: Any) -> dict[str, Any] | None:
         ver = out.pop("version", None)
         block = dict(out)
         out = {"version": str(ver or "1.0"), "layout": [block]}
+    if isinstance(out.get("layout"), list):
+        out["layout"] = _sanitize_layout(out["layout"])
     return out
 
 
@@ -173,13 +250,21 @@ WIDGET JSON SCHEMA MODE (WIDGET_MODE=json):
     { "type": "table", "id": "...", "title": "...", "columns": [ ... ], "rows": [ [ ... ], ... ] }
   - action_row:
     { "type": "action_row", "id": "...", "buttons": [ { "id": "...", "label": "...", "intent": "..." }, ... ] }
+  - image (photos, diagrams, icons, illustrations — any raster or SVG via URL/data URI):
+    { "type": "image", "id": "...", "title": "...", "src": "https://... OR data:image/png;base64,...", "alt": "accessible description", "caption": "optional caption", "fit": "contain|cover" }
 
 Data grounding:
 - Prefer data from user message or <RESPONSE>. When real data is unavailable, use illustrative/mock data and label it clearly (e.g. "Example data", "Mock data").
 
 Interactivity:
 - Use action_row buttons to request follow-ups via intent strings (e.g., "explain_methodology", "show_risks").
-- If the user needs true controls (sliders, inputs, live calculator) that the JSON blocks cannot express, you MAY put a complete mini HTML document (with inline JS) inside <WIDGET> instead of JSON — the app will still render it. Prefer JSON when charts/KPIs/tables suffice.
+- GAMES, TOYS, and CUSTOM APPS (tic-tac-toe, puzzles, interactive demos, any playable UI): you MUST output a **complete HTML document** (`<html>...</html>` with CSS/JS) inside `<WIDGET>`, NOT a JSON schema. JSON blocks cannot represent a real game board — never dump raw index arrays like `[0,1,2]` as layout items.
+- If the user needs true controls (sliders, inputs, live calculator), rich HTML/SVG/canvas, or complex layouts that JSON blocks cannot express, you MAY put a complete mini HTML document (with inline JS) inside <WIDGET> instead of JSON — the app will still render it. Prefer JSON when charts/KPIs/tables/images suffice.
+- For photographs, diagrams, or icons in JSON mode, use the `image` block with a valid https:// URL or a data: URI. Combine `image` with `text`, `chart`, and `table` blocks as needed.
+
+Dynamic layout (JSON) — avoid static, single-block dashboards:
+- Shape `layout` like a short story: context first, then metrics, then detail, then actions. Mix block types (text, kpi_row, chart, table, image, action_row) whenever it improves scanning; do not default to one lonely chart if KPIs or a sentence of framing would help.
+- Use `action_row` for obvious follow-up intents; keep blocks ordered top-to-bottom by importance so the widget feels purposeful, not generic.
 """
 
 
@@ -231,6 +316,14 @@ Forbidden (never include):
 - eval / new Function
 """
 
+_DYNAMIC_WIDGET_UX_RULE = """
+Dynamic, responsive widgets (not static posters):
+- Layout: use flex/grid with wrap, minmax(), and clamp() so content reflows when the iframe is narrow or wide. Prefer fluid widths (%, fr, max-width) over fixed pixel widths for main columns.
+- Motion & feedback: add CSS transitions on hover/focus for cards, buttons, and controls; subtle transform (translateY) on hover where it aids affordance. Enable chart library animation (e.g. ECharts animation / animationDuration) so series draw in smoothly.
+- Interactivity: expose meaningful controls — tabs, toggles, filters, sliders, dataZoom/brush on charts when data density warrants it. When state changes, re-render charts/tables immediately (same reactive pattern as sliders).
+- Depth: combine visuals (chart + KPI strip + short table + optional image/diagram) when the answer benefits; vary structure by use case instead of repeating one template every turn.
+"""
+
 _OUTPUT_CONTRACT_STRICT = """
 OUTPUT CONTRACT (STRICT — MUST FOLLOW)
 You MUST return these sections in this exact order:
@@ -260,6 +353,8 @@ Recommended (pick the best fit):
 - Chart.js: https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js
 - ApexCharts: https://cdn.jsdelivr.net/npm/apexcharts
 - Tabulator (tables): https://cdn.jsdelivr.net/npm/tabulator-tables/dist/js/tabulator.min.js + CSS
+- Mermaid (flowcharts, sequence diagrams): https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js
+- Three.js (simple 3D): https://cdn.jsdelivr.net/npm/three/build/three.min.js
 
 You may use any other public library from these CDNs. Choose the library that creates the best, most accurate visualization.
 
@@ -495,6 +590,7 @@ The user's message is only a greeting, thanks, acknowledgement, or goodbye.
 - IMPORTANT: In HTML mode, the content inside <WIDGET> MUST be HTML (not JSON). It must contain opening <html> and closing </html>.
 - Return a COMPLETE, self-contained HTML document (opening <html> to closing </html>).
 - Inline ALL CSS in <style> and ALL JS in <script>. External files: use any public CDN (cdnjs, jsdelivr, unpkg, cdn.plot.ly) for charts, tables, and other libraries.
+- Visuals — use freely when they clarify the answer: <img> (https:// or data:image/...), inline <svg>, <figure>/<figcaption>, <picture>, <canvas> for drawings, and background-image in CSS (url() to https or data URIs). For diagrams/flowcharts you may embed SVG markup or use canvas/D3/Mermaid via CDN. Attribute image sources when the license requires it.
 - {_LIBRARIES_RULE.strip()}
 - {_ANALYTICS_DEFAULTS_RULE.strip()}
 - {_COLOR_THEMING_RULE.strip()}
@@ -505,6 +601,7 @@ The user's message is only a greeting, thanks, acknowledgement, or goodbye.
 - No markdown fences/backticks inside <WIDGET>. Use ONLY raw HTML/CSS/JS.
 - Always call your main render/calc function once on page load so output is never empty (e.g., call `init()` or `render()` at the end of <script>).
 - Charts/tables must be drawn from the embedded dataset immediately after the first render call.
+- {_DYNAMIC_WIDGET_UX_RULE.strip()}
 - Slider/input changes → local calc() only (never sendPrompt on drag).
 - Slider initial values MUST match the exact numbers in your <RESPONSE>. Never invent defaults.
 - Use 0.5px solid borders — never 1px solid.
@@ -526,7 +623,7 @@ TOKEN LIMIT — you have ~{combined_max_tokens} tokens total for <RESPONSE> + <W
 - For comparison tables in <RESPONSE>: keep focused so the widget has room. Both must fit.
 """
 
-    return f"""You are an expert AI assistant with rich interactive output capabilities.
+    return f"""You are an expert AI assistant with rich, dynamic interactive output — widgets should feel alive, responsive, and tailored to each question (not repetitive templates).
 {social_turn_banner}
 Output style: No emojis. Neat, clean, professional — in both <RESPONSE> text and <WIDGET>.
 {token_limit_block}
@@ -545,7 +642,7 @@ Only return an EMPTY widget block (<WIDGET></WIDGET>) when the turn is not “wi
 Infer from the user's question and your <RESPONSE> content whether a widget would help. If your <RESPONSE> has structure, numbers, comparisons, or decision support, generate the best-fit widget.
 
 Widget warrant decision checklist:
-- Generate NON-EMPTY widget if the user asks for charts, dashboard, analytics, comparison, trends, KPIs, forecasting, ranking, tabular breakdown, or numeric exploration.
+- Generate NON-EMPTY widget if the user asks for charts, dashboard, analytics, comparison, trends, KPIs, forecasting, ranking, tabular breakdown, numeric exploration, diagrams, illustrations, or images that support the answer.
 - Generate NON-EMPTY widget if your response includes measurable values that benefit from visual or interactive interpretation.
 - Return EMPTY widget for pure explanation/definition/planning where a chart would be decorative noise.
 
@@ -562,6 +659,7 @@ Chart/visual selection — pick the right type for the data and use case:
 | Rows > 8, breakdown | Tabulator table | Tabulator |
 | KPI metrics | KPI tiles + optional chart | CSS + ECharts |
 | Process, flow | Diagram, sankey, funnel | D3, ECharts |
+| Photo, illustration, icon | <img> / inline SVG / image block (JSON) | https or data URI |
 
 Libraries: ECharts (cdn.jsdelivr.net/npm/echarts), Plotly (cdn.plot.ly), Chart.js (cdnjs), Tabulator (tabulator.info). Pick what fits.
 

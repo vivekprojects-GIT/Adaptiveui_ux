@@ -10,6 +10,8 @@ export {
   SparklesIcon,
   RocketLaunchIcon,
   InformationCircleIcon,
+  TrashIcon,
+  ArrowDownTrayIcon,
   ArrowRightOnRectangleIcon,
   EyeIcon,
   EyeSlashIcon,

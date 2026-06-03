@@ -267,6 +267,15 @@ class BayesianEngine:
     def reset_user(self, uid: str):
         self.users.pop(uid, None)
 
+    def clear_conversation_thread(self, uid: str) -> None:
+        """Drop chat history and last-turn pointers without resetting posteriors or reward log."""
+        u = self.get_user(uid)
+        u["history"] = []
+        u["last_message"] = ""
+        u["last_response"] = ""
+        u["last_strategy"] = None
+        u["last_x"] = None
+
 
 engine = BayesianEngine()
 USERB_ID = "__user_b__"

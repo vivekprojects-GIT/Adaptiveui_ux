@@ -114,6 +114,10 @@ tr.clickable:hover td{background:var(--accent-bg);cursor:pointer}
 .step-title{font-size:14px;font-weight:500}.step-desc{font-size:12px;color:var(--text2);margin-top:2px;line-height:1.5}
 .count-lbl{font-size:12px;color:var(--text2);margin-bottom:8px}
 .empty{font-size:13px;color:var(--text2);padding:12px 0;text-align:center}
+.card,.metric,.raised{transition:transform .22s cubic-bezier(0.22,1,0.36,1),box-shadow .25s ease,border-color .2s ease}
+@media(hover:hover){.card:hover,.metric:hover{transform:translateY(-2px);box-shadow:0 8px 28px rgba(0,0,0,0.1)}}
+@media(prefers-color-scheme:dark){@media(hover:hover){.card:hover,.metric:hover{box-shadow:0 8px 28px rgba(0,0,0,0.45)}}}
+.widget-root{transition:opacity .28s ease}
 </style>"""
 
 _SEND_PROMPT_BRIDGE = """<script>
