@@ -27,7 +27,7 @@ import { downloadTextAsFile, prettifyJsonIfPossible } from '@/lib/downloadFile'
 import { ArrowDownTrayIcon } from '@/components/icons'
 
 const router = useRouter()
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5051'
+const API_BASE = import.meta.env.VITE_API_BASE_URL || ((typeof location !== 'undefined' && /^(localhost|127.0.0.1)$/.test(location.hostname)) ? 'http://localhost:5051' : '')
 
 /** FastAPI uses `detail`; our API uses `error` — normalize for user-visible messages. */
 function formatApiErrorBody(d: Record<string, unknown>, fallback: string): string {

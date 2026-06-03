@@ -8,7 +8,7 @@ import { setAccessToken } from '@/lib/auth'
 import { showToast } from '@/lib/toast'
 
 const router = useRouter()
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5051'
+const API_BASE = import.meta.env.VITE_API_BASE_URL || ((typeof location !== 'undefined' && /^(localhost|127.0.0.1)$/.test(location.hostname)) ? 'http://localhost:5051' : '')
 const mode = ref<'login' | 'register'>('login')
 const username = ref('')
 const email = ref('')

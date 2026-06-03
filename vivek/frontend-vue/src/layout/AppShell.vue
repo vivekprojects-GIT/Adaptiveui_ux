@@ -37,7 +37,7 @@ const collapseNav = ref(true)
 const theme = ref<ThemeMode>(getThemeMode())
 const themeLabel = computed(() => (theme.value === 'system' ? 'System' : theme.value === 'dark' ? 'Dark' : 'Light'))
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5051'
+const API_BASE = import.meta.env.VITE_API_BASE_URL || ((typeof location !== 'undefined' && /^(localhost|127.0.0.1)$/.test(location.hostname)) ? 'http://localhost:5051' : '')
 const isAdmin = ref(false)
 
 function linkClasses(path: string) {

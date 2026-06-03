@@ -21,7 +21,7 @@ type StrategyAnalyticsResp = {
   summary: { total_usage: number; wins: number; trials: number }
 }
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5051'
+const API_BASE = import.meta.env.VITE_API_BASE_URL || ((typeof location !== 'undefined' && /^(localhost|127.0.0.1)$/.test(location.hostname)) ? 'http://localhost:5051' : '')
 const HISTORY_KEY = 'prism_strategy_version_history_v1'
 const MAX_HISTORY_PER_STRATEGY = 20
 const EVENT_TYPE_SUGGESTIONS = ['Decision', 'Confusion', 'Follow-up', 'Summary', 'Escalation'] as const

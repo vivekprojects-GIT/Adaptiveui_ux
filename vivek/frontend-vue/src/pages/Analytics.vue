@@ -11,7 +11,7 @@ import { MOTION_BASE } from '@/lib/motion'
 import { enabledStrategyIds, getStrategyLabel } from '@/lib/strategiesStore'
 import { sessionUserState } from '@/lib/sessionUser'
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5051'
+const API_BASE = import.meta.env.VITE_API_BASE_URL || ((typeof location !== 'undefined' && /^(localhost|127.0.0.1)$/.test(location.hostname)) ? 'http://localhost:5051' : '')
 
 const rewardWindow = 50
 const strategyWindow = 60

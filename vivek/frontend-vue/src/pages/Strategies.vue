@@ -15,7 +15,7 @@ type RowStatus = 'Healthy' | 'Review' | 'Failing'
 type ConfidenceLevel = 'High' | 'Medium' | 'Need review' | 'Failing'
 type SortBy = 'status' | 'success' | 'label' | 'last_used'
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5051'
+const API_BASE = import.meta.env.VITE_API_BASE_URL || ((typeof location !== 'undefined' && /^(localhost|127.0.0.1)$/.test(location.hostname)) ? 'http://localhost:5051' : '')
 const EVENT_TYPE_SUGGESTIONS = ['Decision', 'Confusion', 'Follow-up', 'Summary', 'Escalation'] as const
 
 const router = useRouter()
