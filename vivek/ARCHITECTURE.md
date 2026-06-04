@@ -152,6 +152,43 @@ action_row → ActionRow     (clickable → re-prompts the same data)
 > model-generated UI.** `widget-registry.json` says what's possible; `widgetRegistry.ts`
 > maps each type to your component; the LLM only supplies the values.
 
+### 5a. How the filled values become pixels (two render mechanisms)
+Once the values arrive as the `:block` prop, the component renders them one of two ways:
+
+**(A) Most blocks → Vue template binding (values → HTML/DOM).**
+The component inserts the values straight into its template — no canvas. e.g. `KpiRow.vue`:
+```vue
+<div v-for="it in block.items" :key="...">
+  <div>{{ it.label }}</div>                                  <!-- "Data Center"  -->
+  <div :class="{ 'text-emerald-600': it.tone==='positive' }">
+    {{ it.value }}                                            <!-- "$47.5B"      -->
+  </div>
+</div>
+```
+Vue reads `block.items`, `v-for` creates one styled element per item, `{{ it.value }}`
+becomes a real text node, `:class` maps `tone` → Tailwind classes. Vue diffs the virtual
+DOM and patches the real DOM. (Text is interpolated, so it's HTML-escaped — safe.)
+This path covers `text, kpi_row, table, stat_card, progress, badge_row, action_row, image`.
+
+**(B) Charts → ECharts draws the values on a `<canvas>`.**
+Numbers can't be template text — they must be *drawn*. `WidgetSchemaChart.vue`:
+```ts
+const renderable = computed(() => chartHasRenderableData(props.chart))   // hides empty charts
+// on mount, and on any data change:
+function initChart() {
+  chart = echarts.init(rootEl.value, undefined, { renderer: 'canvas' })
+  chart.setOption(buildEChartsOption(props.chart, props.title, { dark }), true)
+}
+onMounted(refresh)
+watch(() => props.chart, refresh, { deep: true })   // values change → redraw
+```
+So: `block.chart.series.values → buildEChartsOption() → chart.setOption() → canvas pixels`,
+e.g. `values:[47.5,10.4,1.6,1.1] → series:[{type:'bar', data:[47.5,10.4,1.6,1.1]}]`.
+
+**Reactivity:** both paths track the `:block` prop. Template blocks re-render automatically
+when `block` changes; the chart's `deep` watcher re-runs `setOption` — so widgets update
+live during streaming (block-by-block) and after an action-button re-prompt, with no remount.
+
 ### One-line summary
 ```
 widget-registry.json
