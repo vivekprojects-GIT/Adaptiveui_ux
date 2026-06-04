@@ -110,14 +110,47 @@ run through `cleanAssistantText`/`stripLeakedJson` (no raw JSON/ASCII ever shows
 partial widget renders **block-by-block** via the salvage parser (the chart appears the
 moment its JSON block closes).
 
-### 5. Render with your components (`WidgetRegistryRenderer.vue`)
-`parseLayout` (full parse → salvage → drop empty charts) → for each block:
+### 5. Render: type → component (`lib/widgetRegistry.ts`) → fill values → same component
+`WidgetRegistryRenderer.vue` runs `parseLayout` (full parse → salvage → drop empty charts),
+then for each block does:
+```vue
+<component
+   :is="resolveWidget(block.type).component"   <!-- widgetRegistry.ts: type → your Vue component -->
+   :block="block"                              <!-- the LLM's VALUES go in as a prop -->
+/>
 ```
-resolveWidget("text")       → TextBlock
-resolveWidget("chart")      → ChartBlock → WidgetSchemaChart → buildEChartsOption() → ECharts <div>
-resolveWidget("action_row") → ActionRow (clickable → re-prompts the same data)
+
+**`lib/widgetRegistry.ts` is the render mapping.** It reads the same `widget-registry.json`
+and holds a `COMPONENTS` map of block `type` → your real component code:
+```ts
+const COMPONENTS = {
+  text: TextBlock, kpi_row: KpiRow, chart: ChartBlock, table: TableBlock,
+  action_row: ActionRow, image: ImageBlock, stat_card: StatCardBlock,
+  progress: ProgressList, badge_row: BadgeRow,   // (lazy-imported)
+}
+resolveWidget(type) → the mapped component (or null)
 ```
-`<component :is>` mounts real Vue components inline. **No iframe, no HTML, no CDN.**
+
+So the render contract is:
+```
+type   → widgetRegistry.ts (resolveWidget) → your component (e.g. ChartBlock.vue)
+values → passed as :block → the component reads them → renders
+```
+
+The LLM **never makes a component** — it only fills DATA into a block. That block (the
+LLM's values) is handed to the **pre-existing, registered** component as the `:block` prop.
+The component is defined **once** in your codebase and **reused** every turn; the model just
+supplies different values. For our example:
+```
+text       → TextBlock     (renders the sentence, escaped)
+chart      → ChartBlock → WidgetSchemaChart → buildEChartsOption(block.chart) → ECharts <div>
+action_row → ActionRow     (clickable → re-prompts the same data)
+```
+`<component :is>` mounts real Vue component instances inline. **No iframe, no HTML, no CDN.**
+
+> The point of the registry pattern: **one component definition, many data fills, zero
+> model-generated UI.** `widget-registry.json` says what's possible; `widgetRegistry.ts`
+> maps each type to your component; the LLM only supplies the values.
 
 ### One-line summary
 ```
@@ -125,7 +158,8 @@ widget-registry.json
   → build_json_widget_rule() → "menu" in the prompt
   → synthesizer: WARRANT? → pick KIND → fill SHAPE with real values → emit <WIDGET>{json}
   → validate against registry (drop off-menu/no-data; html="")
-  → SSE stream → WidgetRegistryRenderer → resolveWidget(type) → <component :is> → components / ECharts
+  → SSE stream → WidgetRegistryRenderer → resolveWidget(type) [lib/widgetRegistry.ts → COMPONENTS map]
+  → <component :is :block> → your component reads the LLM's values → renders (ECharts for charts)
 ```
 
 ---
