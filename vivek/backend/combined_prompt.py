@@ -701,6 +701,64 @@ def build_combined_user_prompt(
     return "\n".join(ctx)
 
 
+def strip_leaked_widget_json(text: str) -> str:
+    """Remove any widget JSON the model leaked into the prose response.
+
+    The <RESPONSE> is meant to be human text only. Sometimes the model dumps a
+    block object / layout JSON (or a ```json fence) into it. We strip:
+      - fenced code blocks whose body looks like widget JSON, and
+      - bare {...}/[...] blobs that contain widget keys ("type"/"layout"/"version"),
+        balanced or truncated — so raw JSON can NEVER reach the client.
+    """
+    s = text or ""
+    # 1) fenced blocks that look like widget JSON
+    def _fence(m: "re.Match") -> str:
+        inner = (m.group(1) or "").strip()
+        if inner[:1] in "[{" and re.search(r'"(?:type|layout|items|tone|series|chart|version)"', inner):
+            return ""
+        return m.group(0)
+    s = re.sub(r"```[\w-]*\s*([\s\S]*?)```", _fence, s)
+    # 2) bare JSON blobs starting with a widget key
+    out = []
+    i = 0
+    n = len(s)
+    while i < n:
+        ch = s[i]
+        if ch in "{[":
+            head = s[i:i + 400]
+            if re.search(r'"(?:type|layout|version)"\s*:', head):
+                close = "}" if ch == "{" else "]"
+                depth = 0
+                in_str = False
+                esc = False
+                j = i
+                while j < n:
+                    c = s[j]
+                    if in_str:
+                        if esc:
+                            esc = False
+                        elif c == "\\":
+                            esc = True
+                        elif c == '"':
+                            in_str = False
+                    elif c == '"':
+                        in_str = True
+                    elif c == ch:
+                        depth += 1
+                    elif c == close:
+                        depth -= 1
+                        if depth == 0:
+                            j += 1
+                            break
+                    j += 1
+                # balanced → skip the blob; truncated → drop to end
+                i = j if depth == 0 else n
+                continue
+        out.append(ch)
+        i += 1
+    return "".join(out).strip()
+
+
 def parse_combined_output(raw: str) -> Tuple[str, str]:
     """
     Parse model combined output into (response_text, widget_payload).
@@ -733,5 +791,8 @@ def parse_combined_output(raw: str) -> Tuple[str, str]:
     if widget_match:
         raw_widget = widget_match.group(1).strip()
         widget_payload = finalize_widget_schema_json(raw_widget)
+
+    # The response is human prose only — never let leaked widget JSON reach the client.
+    response_text = strip_leaked_widget_json(response_text)
 
     return response_text, widget_payload

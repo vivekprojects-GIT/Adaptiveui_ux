@@ -47,6 +47,7 @@ from .combined_prompt import (
     finalize_widget_schema_json,
     is_social_or_greeting_turn,
     parse_combined_output,
+    strip_leaked_widget_json,
     widget_schema_json_is_valid,
 )
 from .engine import engine, USERB_ID
@@ -1060,11 +1061,11 @@ def chat_stream(req: ChatReq, bg: BackgroundTasks, user_id: str = Depends(requir
                     timeout=combined_timeout, max_tokens=combined_max_tokens, temperature=0.2,
                 )
 
-                # Strict primitives: buffer response until </RESPONSE>, then emit
-                # the enforced version. Otherwise stream raw tokens directly.
-                emit_raw_response = not (
-                    config.STRICT_PRIMITIVES and not is_social_or_greeting_turn(msg)
-                )
+                # Always BUFFER the response (don't stream raw tokens): the model can leak
+                # widget JSON into <RESPONSE>, so we wait for </RESPONSE>, strip any leaked
+                # JSON, then emit the clean text in chunks. Guarantees no JSON ever reaches
+                # the client from the backend, regardless of the frontend build.
+                emit_raw_response = False
 
                 response_closed = False
                 for event in parse_combined_stream(
@@ -1073,14 +1074,11 @@ def chat_stream(req: ChatReq, bg: BackgroundTasks, user_id: str = Depends(requir
                     emit_widget_deltas=True,
                 ):
                     etype = event[0]
-                    if etype == "response_delta":
-                        yield sse_pack({"type": "response_delta", "delta": event[1]})
-                    elif etype == "response_closed":
+                    if etype == "response_closed":
                         response_closed = True
-                        response = _maybe_enforce_primitive(msg, strat, event[1])
-                        if not emit_raw_response and response:
-                            for i in range(0, len(response), 180):
-                                yield sse_pack({"type": "response_delta", "delta": response[i:i + 180]})
+                        response = strip_leaked_widget_json(_maybe_enforce_primitive(msg, strat, event[1]))
+                        for k in range(0, len(response), 180):
+                            yield sse_pack({"type": "response_delta", "delta": response[k:k + 180]})
                     elif etype == "widget_start":
                         yield sse_pack({"type": "widget_start"})
                     elif etype == "widget_delta":
@@ -1088,10 +1086,9 @@ def chat_stream(req: ChatReq, bg: BackgroundTasks, user_id: str = Depends(requir
                         yield sse_pack({"type": "widget_delta", "delta": event[1]})
                     elif etype == "complete":
                         if not response_closed:
-                            response = _maybe_enforce_primitive(msg, strat, event[1])
-                            if not emit_raw_response and response:
-                                for i in range(0, len(response), 180):
-                                    yield sse_pack({"type": "response_delta", "delta": response[i:i + 180]})
+                            response = strip_leaked_widget_json(_maybe_enforce_primitive(msg, strat, event[1]))
+                            for k in range(0, len(response), 180):
+                                yield sse_pack({"type": "response_delta", "delta": response[k:k + 180]})
                         widget_payload_raw = event[2]
                         break
 
