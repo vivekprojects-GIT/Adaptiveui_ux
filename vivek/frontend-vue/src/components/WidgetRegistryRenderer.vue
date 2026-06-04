@@ -84,15 +84,33 @@ function salvageBlocks(s: string): Block[] {
   return out
 }
 
+// A text block's content that is actually JSON (a block/layout the model stuffed into
+// content) — must NEVER render as raw text. Detect and drop.
+const NUMERIC_ARRAY_RE = /^\s*\[\s*-?\d+(\.\d+)?(\s*,\s*-?\d+(\.\d+)?)*\s*\]\s*$/
+function textContentIsJson(content: string): boolean {
+  const t = String(content || '').trim()
+  if (!(t.startsWith('{') || t.startsWith('['))) return false
+  // looks like a widget block/array, or parses as a JSON object/array
+  if (/"(?:type|layout|items|tone|label|series|chart|value)"\s*:/.test(t)) return true
+  try {
+    const o = JSON.parse(t)
+    return o && typeof o === 'object'
+  } catch {
+    return /^[{[]/.test(t) // truncated JSON-ish → still drop
+  }
+}
+
 function finalizeBlocks(layout: unknown[]): Block[] {
   const normalized = layout.map((b) => normalizeWidgetBlock(b)) as Block[]
-  // Drop bare numeric-array text blocks (e.g. tic-tac-toe win lines "[0,1,2]") — not real content.
-  const NUMERIC_ARRAY_RE = /^\s*\[\s*-?\d+(\.\d+)?(\s*,\s*-?\d+(\.\d+)?)*\s*\]\s*$/
   return normalized.filter((b) => {
     const type = String(b.type || '').toLowerCase()
     // Never show an empty chart card — drop charts with no renderable data outright.
     if (type === 'chart' && !chartHasRenderableData((b as { chart?: any }).chart || {})) return false
-    if (type === 'text' && NUMERIC_ARRAY_RE.test(String((b as { content?: string }).content ?? ''))) return false
+    if (type === 'text') {
+      const c = String((b as { content?: string }).content ?? '')
+      // Drop numeric-array junk AND any text block whose content is raw JSON.
+      if (NUMERIC_ARRAY_RE.test(c) || textContentIsJson(c)) return false
+    }
     return true
   })
 }

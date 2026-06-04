@@ -219,12 +219,27 @@ def _chart_has_data(chart: dict[str, Any]) -> bool:
 _NUMERIC_ARRAY_RE = re.compile(r"^\s*\[\s*-?\d+(\.\d+)?(\s*,\s*-?\d+(\.\d+)?)*\s*\]\s*$")
 
 
+def _looks_like_json(s: str) -> bool:
+    try:
+        return isinstance(json.loads(s), (dict, list))
+    except Exception:
+        return s.strip()[:1] in "{["  # truncated JSON-ish
+
+
 def _block_is_renderable(b: dict[str, Any]) -> bool:
     t = str(b.get("type") or "").lower()
     if t == "text":
         content = str(b.get("content") or "").strip()
-        # Drop bare numeric arrays (e.g. tic-tac-toe win lines "[0,1,2]") — that's not prose.
-        return bool(content) and not _NUMERIC_ARRAY_RE.match(content)
+        if not content or _NUMERIC_ARRAY_RE.match(content):
+            return False  # bare numeric arrays (e.g. tic-tac-toe "[0,1,2]") are not prose
+        # Drop text whose content is actually JSON (a block/layout the model stuffed in) —
+        # it must never render as raw text in the UI.
+        if content[:1] in "{[" and (
+            re.search(r'"(?:type|layout|items|tone|label|series|chart)"\s*:', content)
+            or _looks_like_json(content)
+        ):
+            return False
+        return True
     if t == "kpi_row":
         items = b.get("items")
         return isinstance(items, list) and any(
