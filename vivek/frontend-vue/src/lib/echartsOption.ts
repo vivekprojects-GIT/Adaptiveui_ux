@@ -71,8 +71,21 @@ function chartKind(chart: ChartSpec): string {
   return String(chart?.kind || 'line').toLowerCase()
 }
 
+/** Categories for a cartesian chart: explicit x_categories, else derived from items. */
+function cartesianCategories(chart: ChartSpec): string[] | undefined {
+  if (Array.isArray(chart?.x_categories) && chart.x_categories.length) return chart.x_categories
+  if (Array.isArray(chart?.items) && chart.items.length) {
+    return chart.items.map((it, i) => String(it.label || it.name || i + 1))
+  }
+  return undefined
+}
+
 function cartesianSeries(chart: ChartSpec) {
-  const raw = chart?.series || []
+  // Fallback: if the model used `items` (label/value) for a bar/line, treat it as one series.
+  let raw = chart?.series || []
+  if ((!Array.isArray(raw) || raw.length === 0) && Array.isArray(chart?.items) && chart.items.length) {
+    raw = [{ name: chart?.y_label || 'Value', values: chart.items.map((it) => toNum(it.value) ?? 0) }]
+  }
   return raw
     .map((s, i) => {
       const vals = Array.isArray(s.values) ? s.values : []
@@ -652,7 +665,7 @@ export function buildEChartsOption(chart: ChartSpec, title = '', opts: { dark?: 
   const isScatter = k === 'scatter' || k === 'bubble'
   const isArea = k === 'area' || k === 'timeseries'
 
-  const cats = chart?.x_categories
+  const cats = cartesianCategories(chart)
   const useCat = Array.isArray(cats) && cats.length > 0
 
   const eSeries = series.map((s, i) => {

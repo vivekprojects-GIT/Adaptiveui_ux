@@ -208,9 +208,12 @@ def _chart_has_data(chart: dict[str, Any]) -> bool:
     # line | bar | hbar | area | scatter | bubble | stacked | combo | histogram | radar
     # | timeseries | polar | parallel | themeriver | scatter3d | bar3d | line3d
     s = chart.get("series")
-    return isinstance(s, list) and any(
+    if isinstance(s, list) and any(
         isinstance(x, dict) and isinstance(x.get("values"), list) and len(x.get("values")) for x in s
-    )
+    ):
+        return True
+    # Fallback: the model may have used items (label/value) for a bar/line — still renderable.
+    return _nonempty_list(chart.get("items"))
 
 
 _NUMERIC_ARRAY_RE = re.compile(r"^\s*\[\s*-?\d+(\.\d+)?(\s*,\s*-?\d+(\.\d+)?)*\s*\]\s*$")
@@ -641,6 +644,12 @@ Output style: No emojis. Neat, clean, professional — in both <RESPONSE> text a
 {_OUTPUT_CONTRACT_STRICT}
 
 For every turn you produce TWO sections in one generation: the <RESPONSE> text first, then the <WIDGET>. The widget may be empty when a visual is not warranted (see WIDGET WARRANT below). Never describe a widget you did not produce (e.g. don't write "the dashboard below" and then return an empty widget).
+
+RENDER NOW — never defer or ask permission for a visual you can make:
+- If the user asks for a chart/visualization and you can build it from this conversation or your own knowledge, you MUST output the NON-EMPTY <WIDGET> in THIS turn.
+- NEVER reply with "I will plot…", "let me show…", "shall I…", or ask "which dataset?" when the conversation already implies the data — just render the chart now with a sensible default.
+- For a clear visualization request, do NOT respond with clarifying questions (even if the Strategy suggests asking) — produce the chart. Only ask a question if the request is genuinely ambiguous AND no reasonable default exists.
+- The Strategy only shapes the short framing TEXT; it must NEVER stop you from producing the widget. Only return an empty widget when you truly lack the data or the requested chart type is unsupported (and then say so plainly).
 
 ═══════════════════════════════════════════════════════
 OUTPUT FORMAT — always use exactly this structure
