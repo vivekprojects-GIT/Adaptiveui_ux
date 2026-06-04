@@ -69,8 +69,8 @@ const metrics = computed(() => {
   const avgLatency = latencyVals.length ? latencyVals.reduce((a, b) => a + b, 0) / latencyVals.length : null
   const positives = rewards.filter((r) => r.reward >= 1).length
   const rewardRate = rewards.length ? positives / rewards.length : null
-  const widgetRate = done.length ? done.filter((d) => (d.widgetHtml ?? '').trim().length > 0).length / done.length : 0
-  const withWidget = done.filter((d) => (d.widgetHtml ?? '').trim().length > 0).length
+  const widgetRate = done.length ? done.filter((d) => (d.widgetSchema ?? '').trim().length > 0).length / done.length : 0
+  const withWidget = done.filter((d) => (d.widgetSchema ?? '').trim().length > 0).length
 
   return {
     totalResponses: done.length,
@@ -132,7 +132,7 @@ const previousMetrics = computed(() => {
     .filter((x): x is number => x != null)
   const avgLatency = latVals.length ? latVals.reduce((a, b) => a + b, 0) / latVals.length : null
   const rewardRate = rewards.length ? rewards.filter((r) => r.reward >= 1).length / rewards.length : null
-  const widgetRate = done.length ? done.filter((d) => (d.widgetHtml ?? '').trim().length > 0).length / done.length : null
+  const widgetRate = done.length ? done.filter((d) => (d.widgetSchema ?? '').trim().length > 0).length / done.length : null
   return {
     totalResponses: done.length,
     totalRewards: rewards.length,
@@ -462,7 +462,7 @@ function updateCharts() {
     true,
   )
 
-  const withWidget = done.filter((d) => (d.widgetHtml ?? '').trim().length > 0).length
+  const withWidget = done.filter((d) => (d.widgetSchema ?? '').trim().length > 0).length
   const withoutWidget = done.length - withWidget
   const jsonSchemaCount = 0
   widgetSplitChart.setOption(

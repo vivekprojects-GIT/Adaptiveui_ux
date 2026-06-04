@@ -242,28 +242,3 @@ function extractBlocksFromIndex(cleaned: string, idx: number): ProgressiveSchema
     totalSoFar: blocks.length + (pendingType ? 1 : 0),
   }
 }
-
-/**
- * For HTML-mode streaming, rebuild the iframe srcdoc periodically. We ensure
- * unclosed tags get a best-effort close so the in-progress paint doesn't show
- * broken markup.
- */
-export function buildProgressiveHtmlDoc(raw: string): string {
-  if (!raw || !raw.trim()) return ''
-  let s = raw
-  const fenceOpen = s.match(/```(?:json|html)?\s*([\s\S]*?)(?:```|$)/i)
-  if (fenceOpen && fenceOpen[1]) s = fenceOpen[1]
-  s = s.replace(/```[\w-]*$/, '').trim()
-  if (!s) return ''
-
-  const lower = s.toLowerCase()
-  if (!lower.includes('<html')) {
-    // Wrap partial body into a minimal doc so iframes don't show default pages.
-    s = `<html><head><meta charset="utf-8"></head><body>${s}</body></html>`
-  }
-
-  // Best-effort close for common dangling tags.
-  if (lower.includes('<body') && !lower.includes('</body>')) s += '</body>'
-  if (lower.includes('<html') && !lower.includes('</html>')) s += '</html>'
-  return s
-}

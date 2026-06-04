@@ -89,7 +89,7 @@ DEFAULT_STRATEGIES = {
     "step_by_step":       "Numbered list of 3-6 steps only.",
     # NEW
     "comparison_table":   "Return a single MARKDOWN TABLE only. Use columns that help compare options (e.g., Option | Pros | Cons | Best for). No bullets outside the table.",
-    "visualization":      "Return a simple TEXT visualization only (ASCII bar chart or small table-of-values). Put it in a fenced code block. No extra prose outside the code block.",
+    "visualization":      "Write a brief 1-2 sentence lead-in that frames what the visual shows. The chart/widget carries the visualization. NEVER draw ASCII charts, tree diagrams, or text-art in the response.",
 }
 
 # Module-level strategy state (may be overwritten by `reload_strategies()`).

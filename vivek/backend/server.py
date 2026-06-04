@@ -44,7 +44,6 @@ from . import config, llm
 from .combined_prompt import (
     build_combined_system_prompt,
     build_combined_user_prompt,
-    extract_embeddable_html_document,
     finalize_widget_schema_json,
     is_social_or_greeting_turn,
     parse_combined_output,
@@ -68,7 +67,6 @@ from .utils import (
     fast_valence,
     negative_strength,
 )
-from .widget_prompt import estimate_widget_height, inject_design_system
 from .widget_stream import parse_combined_stream
 
 
@@ -144,24 +142,6 @@ def sse_pack(evt: dict) -> str:
     return f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
 
 
-def _looks_truncated_widget_html(html: str) -> bool:
-    if not html:
-        return True
-    lower = html.lower()
-    if lower.count("<style") > lower.count("</style>"):
-        return True
-    if lower.count("<script") > lower.count("</script>"):
-        return True
-    if lower.count("<body") > lower.count("</body>"):
-        return True
-    if lower.count("<html") > lower.count("</html>"):
-        return True
-    import re as _re
-    if _re.search(r"[<{(]$", html.strip()):
-        return True
-    return False
-
-
 def _json_layout_is_only_numeric_index_arrays(schema_str: str) -> bool:
     """
     Detect bogus JSON widgets where every block is text like '[0,1,2]' (e.g. tic-tac-toe
@@ -207,42 +187,11 @@ def _dispatch_json_mode_widget(widget_payload_raw: str) -> tuple[str, str, int, 
     return finalized, "", 0, "json_schema_invalid"
 
 
-def _should_generate_widget(message: str) -> bool:
-    """Lightweight intent gate so small-talk / explainers do not force widgets."""
-    import re as _re
-
-    text = (message or "").strip().lower()
-    if not text:
-        return False
-    low_signal = {"hi", "hello", "hey", "thanks", "thank you", "ok", "okay", "got it", "cool"}
-    if text in low_signal:
-        return False
-
-    widget_triggers = (
-        "chart", "graph", "plot", "dashboard", "table", "compare", "comparison",
-        "trend", "timeseries", "time series", "distribution", "heatmap", "scatter",
-        "pie", "bar", "line", "kpi", "analytics", "analyze", "analysis", "forecast",
-        "breakdown", "report", "visualize", "visualise", "show me", "insight", "metrics",
-        "tic tac", "tic-tac", "tictac", "game", "playable", "simulator", "write code",
-        "html page", "mini app", "calculator app",
-    )
-    if any(t in text for t in widget_triggers):
-        return True
-
-    text_only_intents = (
-        "explain", "what is", "why", "how does", "difference between", "define",
-        "summarize", "summarise", "plan", "roadmap", "steps", "implementation plan",
-    )
-    if any(t in text for t in text_only_intents):
-        return False
-
-    has_numeric_cue = bool(_re.search(r"\b\d+(\.\d+)?%?\b", text))
-    has_time_cue = any(t in text for t in ("daily", "weekly", "monthly", "quarterly", "yearly", "over time", "timeline"))
-    has_compare_cue = any(t in text for t in ("vs", "versus", "compare", "top", "rank", "distribution"))
-    if has_numeric_cue and (has_time_cue or has_compare_cue):
-        return True
-
-    return False
+# NOTE: widget generation is NOT gated by keyword matching. The synthesizer LLM
+# decides per turn whether a widget helps AND whether it can populate it with real
+# values using the allowed block types (see the warrant rubric in combined_prompt).
+# A keyword list both over-fires ("bar exam") and misses ("how has revenue moved?"),
+# and it can't know whether the data exists to fill a chart — the model can.
 
 
 # ---------------------------------------------------------------------------
@@ -888,7 +837,6 @@ def _build_adaptive_prompt(uid: str, msg: str):
     )
 
     format_rule = config.STRATEGIES.get(strat, "Be helpful and clear.")
-    widget_required = _should_generate_widget(msg)
 
     prim_block = ""
     if _is_admin_user(uid):
@@ -908,7 +856,6 @@ def _build_adaptive_prompt(uid: str, msg: str):
         format_rule=format_rule,
         primitive_extra_context=(getattr(config, "SKILLS_CONTENT", "") or "") + prim_block,
         user_message=msg,
-        widget_required=widget_required,
         forbidden_components=None,
         required_components=None,
     )
@@ -918,7 +865,7 @@ def _build_adaptive_prompt(uid: str, msg: str):
         "user": user, "ev": ev, "auto_detected": auto_detected, "auto_r": auto_r,
         "explicit": explicit, "force_explore": force_explore,
         "strat": strat, "scores": scores, "x": x, "prev": prev,
-        "format_rule": format_rule, "widget_required": widget_required,
+        "format_rule": format_rule,
         "combined_system": combined_system, "combined_prompt": combined_prompt,
     }
 
@@ -1006,39 +953,20 @@ def chat(req: ChatReq, bg: BackgroundTasks, user_id: str = Depends(require_user_
         response = raw_combined.strip()
     response = _maybe_enforce_primitive(msg, ctx["strat"], response)
 
-    widget_html = ""
+    widget_html = ""  # components-only: always empty; kept for payload/DB compatibility
     widget_schema = ""
     widget_height = 0
     widget_debug = ""
-    widget_mode = getattr(config, "WIDGET_MODE", "json").strip().lower()
     raw_preview = ""
 
     if widget_payload_raw:
-        if widget_mode == "json":
-            widget_schema, widget_html, widget_height, tag = _dispatch_json_mode_widget(widget_payload_raw)
-            widget_debug = tag or ""
-        else:
-            if _looks_truncated_widget_html(widget_payload_raw):
-                widget_debug = "combined_widget_truncated"
-            else:
-                widget_html = widget_payload_raw
-                widget_height = estimate_widget_height(widget_payload_raw)
-                widget_debug = "combined_widget_ok"
+        widget_schema, widget_html, widget_height, tag = _dispatch_json_mode_widget(widget_payload_raw)
+        widget_debug = tag or ""
     else:
-        widget_debug = "combined_no_schema" if widget_mode == "json" else "combined_no_widget_tag"
+        # No <WIDGET> payload — the model judged this turn better as text-only (or declined).
+        # That is a valid outcome; render prose with no widget card.
+        widget_debug = "combined_no_schema"
         raw_preview = (raw_combined or "")[:800]
-        if widget_mode != "json" and ctx["widget_required"]:
-            placeholder = (
-                "<html><head></head><body>"
-                "<div class='widget-root card'><div class='card-title'>Interactive widget</div>"
-                "<div class='empty'>No widget returned.</div></div>"
-                "</body></html>"
-            )
-            widget_html = inject_design_system(placeholder)
-            widget_height = estimate_widget_height(widget_html)
-            widget_debug = "fallback_widget_generated"
-        elif not ctx["widget_required"]:
-            widget_debug = "widget_skipped_by_intent"
 
     user = ctx["user"]
     user["history"].append({"user": msg, "assistant": response})
@@ -1115,11 +1043,10 @@ def chat_stream(req: ChatReq, bg: BackgroundTasks, user_id: str = Depends(requir
             "auto_reason": ev["reason"],
         })
 
-        widget_html = ""
+        widget_html = ""  # components-only: always empty; kept for payload/DB compatibility
         widget_schema = ""
         widget_height = 0
         widget_debug = ""
-        widget_mode = getattr(config, "WIDGET_MODE", "json").strip().lower()
         raw_preview = ""
         response = ""
         mode = adapt_mode
@@ -1191,29 +1118,10 @@ def chat_stream(req: ChatReq, bg: BackgroundTasks, user_id: str = Depends(requir
             else:
                 raise RuntimeError("Unsupported ADAPTIVE_LLM_MODE (expected openai_compat or anthropic)")
 
-            # Finalize widget payload for the canonical 'done' event.
+            # Finalize widget payload for the canonical 'done' event (JSON schema only).
             if widget_payload_raw:
-                if widget_mode == "json":
-                    widget_schema, widget_html, widget_height, tag = _dispatch_json_mode_widget(widget_payload_raw)
-                    widget_debug = tag or ""
-                else:
-                    import re as _re
-                    raw_widget = widget_payload_raw
-                    if "```" in raw_widget:
-                        fence = _re.search(r"```(?:json|html)?\s*(.*?)```", raw_widget, _re.DOTALL | _re.IGNORECASE)
-                        raw_widget = fence.group(1).strip() if fence else _re.sub(r"```\w*", "", raw_widget).strip()
-                    if "<" in raw_widget and ">" in raw_widget:
-                        if "<html" not in raw_widget.lower():
-                            raw_widget = f"<html><head></head><body>{raw_widget}</body></html>"
-                        raw_widget = _re.sub(r"<!DOCTYPE[^>]*>", "", raw_widget, flags=_re.IGNORECASE).strip()
-                        widget_payload_raw = inject_design_system(raw_widget)
-                        if _looks_truncated_widget_html(widget_payload_raw):
-                            widget_debug = "stream_widget_truncated"
-                        else:
-                            widget_html = widget_payload_raw
-                            widget_height = estimate_widget_height(widget_html)
-            if widget_mode != "json" and not widget_html:
-                widget_debug = widget_debug or "no_widget"
+                widget_schema, widget_html, widget_height, tag = _dispatch_json_mode_widget(widget_payload_raw)
+                widget_debug = tag or ""
             if not response and not widget_payload_raw:
                 response = "(No content)"
 

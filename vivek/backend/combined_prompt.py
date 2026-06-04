@@ -23,7 +23,6 @@ from pathlib import Path
 from typing import Any, Tuple
 
 from . import config
-from .widget_prompt import inject_design_system
 
 
 def strip_widget_markdown_fences(raw: str) -> str:
@@ -191,12 +190,23 @@ def _chart_has_data(chart: dict[str, Any]) -> bool:
         return _nonempty_list(chart.get("boxes"))
     if kind in {"sankey", "graph"}:
         return _nonempty_list(chart.get("links"))
-    if kind in {"pie", "donut", "funnel", "treemap", "sunburst", "waterfall", "gauge"}:
+    if kind in {"tree", "mindmap", "org", "orgchart"}:
+        # Accept the same variants the renderer reads: root | tree | data | top-level node | items.
+        root = chart.get("root") or chart.get("tree") or chart.get("data")
+        if isinstance(root, list):
+            root = root[0] if root else None
+        if isinstance(root, dict) and (root.get("name") or root.get("label") or root.get("children")):
+            return True
+        if chart.get("name") or _nonempty_list(chart.get("children")) or _nonempty_list(chart.get("items")):
+            return True
+        return False
+    if kind in {"pie", "donut", "funnel", "treemap", "sunburst", "waterfall", "gauge", "rose"}:
         if _nonempty_list(chart.get("items")):
             return True
         s = chart.get("series")
         return isinstance(s, list) and any(isinstance(x, dict) and x.get("values") for x in s)
     # line | bar | hbar | area | scatter | bubble | stacked | combo | histogram | radar
+    # | timeseries | polar | parallel | themeriver | scatter3d | bar3d | line3d
     s = chart.get("series")
     return isinstance(s, list) and any(
         isinstance(x, dict) and isinstance(x.get("values"), list) and len(x.get("values")) for x in s
@@ -308,41 +318,6 @@ def widget_schema_json_is_valid(schema_str: str) -> bool:
     return isinstance(o, dict) and isinstance(o.get("layout"), list)
 
 
-def extract_embeddable_html_document(raw: str) -> str | None:
-    """
-    If the model put HTML/JS widgets inside <WIDGET> while WIDGET_MODE=json, return a full HTML
-    document suitable for inject_design_system + iframe. Otherwise None.
-    """
-    s = strip_widget_markdown_fences((raw or "").strip())
-    if not s or "<" not in s or ">" not in s:
-        return None
-    st = s.lstrip()
-    if st.startswith("{") and "<div" not in s.lower() and "<html" not in s.lower():
-        return None
-    low = s.lower()
-    if "<html" in low or "<!doctype" in low:
-        return re.sub(r"<!DOCTYPE[^>]*>", "", s, flags=re.IGNORECASE).strip()
-    if any(
-        tag in low
-        for tag in (
-            "<script",
-            "<body",
-            "<div",
-            "<canvas",
-            "<iframe",
-            "<form",
-            "<input",
-            "<button",
-            "<style",
-        )
-    ):
-        inner = re.sub(r"<!DOCTYPE[^>]*>", "", s, flags=re.IGNORECASE).strip()
-        if "<html" not in inner.lower():
-            return f"<html><head></head><body>{inner}</body></html>"
-        return inner
-    return None
-
-
 def finalize_widget_schema_json(raw: str) -> str:
     """
     Normalize model output for the Vue renderer: strip fences, extract JSON, coerce layout.
@@ -397,7 +372,8 @@ Honoring an explicitly requested chart type:
 - Never pretend an unsupported type is supported, and never relabel a different chart as the requested type.
 
 Interactivity:
-- Use action_row buttons to request follow-ups via intent strings (e.g., "explain_methodology", "show_risks").
+- action_row buttons are VISUALS-ONLY: each button must only offer to redraw the data ALREADY shown as a different supported chart kind (e.g. "Show as bar chart", "View as treemap", "Show as pie", "View as horizontal bars"). The button label is sent back as the next prompt, so it must be something you can definitely do with the data on screen.
+- NEVER add action buttons that need data you may not have: no new tickers/companies, no new time periods, no "compare X vs Y", no growth/peers/forecasts, no "explain ...". If no alternative chart kind fits the data, omit the action_row.
 - OUTPUT JSON ONLY. Never output HTML, <script>, <style>, <canvas>, raw markup, or code inside <WIDGET> — only the JSON schema above. There is no HTML mode.
 - If something cannot be expressed with the supported block types (e.g. a playable game, live sliders), DO NOT invent HTML — return <WIDGET></WIDGET> (empty) and explain in <RESPONSE> instead. Never dump raw index arrays like `[0,1,2]`.
 - For photographs, diagrams, or icons, use the `image` block with a valid https:// URL or a data: URI. Combine `image` with `text`, `chart`, and `table` blocks as needed.
@@ -416,12 +392,24 @@ Dynamic layout (JSON) — avoid static, single-block dashboards:
 _REGISTRY_JSON_PATH = Path(__file__).resolve().parent.parent / "frontend-vue" / "src" / "widget-registry.json"
 
 _JSON_RULE_PREAMBLE = """WIDGET JSON SCHEMA MODE (WIDGET_MODE=json):
+- WIDGET WARRANT (decide for yourself — there is no keyword trigger):
+  Include a NON-EMPTY widget ONLY IF both are true: (1) a visual materially helps (a comparison of
+  several numbers, a trend, a breakdown/share, a flow, or a matrix), AND (2) you can populate it with
+  real values from your <RESPONSE> using the supported block types below. If you cannot build it from
+  the allowed blocks (or there is no concrete data), return <WIDGET></WIDGET> (empty) and say so in
+  <RESPONSE>. Do NOT chart a single number, a definition, a yes/no, or an opinion.
 - The content inside <WIDGET> MUST be valid JSON (no markdown fences, no comments).
 - Root object: { "version": "1.0", "layout": [ ... ] }
 - layout is an ordered array of blocks (top-to-bottom).
 - Supported block types ONLY (do not invent new ones):"""
 
 _JSON_RULE_TRAILER = """
+NO FABRICATED DATA (most important — applies to <RESPONSE> and <WIDGET>):
+- If you do NOT actually have the real figures to answer (e.g. live or historical stock prices, a fund's daily returns, exact financials you are not sure of), DO NOT invent, estimate, or use "illustrative"/"mock"/"example"/"est." data, and DO NOT draw a widget.
+- In that case: say plainly in <RESPONSE> that you do not have that specific data, suggest what the user could provide or ask instead, and return <WIDGET></WIDGET> (empty).
+- NEVER label a chart or value "mock", "illustrative", "estimated", or "example" — if it is not real, do not render it. A widget must only ever show real, known values.
+- Educational math demos (e.g. compound-interest with user-given P/r/t) are fine because the user supplied the inputs; market data you don't have is NOT.
+
 Data grounding (STRICT — the widget must mirror your <RESPONSE>):
 - Use ONLY the exact numbers and labels stated in your <RESPONSE>. Do NOT invent values, round differently, or add labels/values not written in <RESPONSE>.
 - For category charts, "x_categories" MUST be the exact entity/segment names you named in <RESPONSE> (e.g. "Data Center", "Gaming") — NEVER 0, 1, 2. Each series value MUST equal the number in <RESPONSE>, aligned to those categories.
@@ -434,7 +422,8 @@ Honoring an explicitly requested chart type:
 - Never pretend an unsupported type is supported, and never relabel a different chart as the requested type.
 
 Interactivity:
-- Use action_row buttons to request follow-ups via intent strings (e.g., "explain_methodology", "show_risks").
+- action_row buttons are VISUALS-ONLY: each button must only offer to redraw the data ALREADY shown as a different supported chart kind (e.g. "Show as bar chart", "View as treemap", "Show as pie", "View as horizontal bars"). The button label is sent back as the next prompt, so it must be something you can definitely do with the data on screen.
+- NEVER add action buttons that need data you may not have: no new tickers/companies, no new time periods, no "compare X vs Y", no growth/peers/forecasts, no "explain ...". If no alternative chart kind fits the data, omit the action_row.
 - OUTPUT JSON ONLY. Never output HTML, <script>, <style>, <canvas>, raw markup, or code inside <WIDGET> — only the JSON schema above. There is no HTML mode.
 - If something cannot be expressed with the supported block types (e.g. a playable game, live sliders), DO NOT invent HTML — return <WIDGET></WIDGET> (empty) and explain in <RESPONSE> instead. Never dump raw index arrays like `[0,1,2]`.
 - For photographs, diagrams, or icons, use the `image` block with a valid https:// URL or a data: URI. Combine `image` with `text`, `chart`, and `table` blocks as needed.
@@ -471,61 +460,6 @@ def build_json_widget_rule() -> str:
         return _JSON_WIDGET_RULE.strip()
 
 
-# ── Design system injected into combined output ────────────────────────────
-
-_DESIGN_SYSTEM_REMINDER = """
-A CSS design system is pre-injected into every widget iframe. Use ONLY these variables:
---bg, --bg2, --bg3 (backgrounds)  --text, --text2, --text3 (text)
---border, --border2 (borders)     --accent, --accent-bg, --accent-b (blue)
---success, --success-bg (green)   --warn, --warn-bg (amber)
---danger, --danger-bg (red)       --radius, --radius-sm, --radius-pill
-
-Pre-built CSS classes (use them directly, no need to redefine):
-.card .raised .card-title .tabs .tab .panel .search .pills .pill
-.ctrl-row .ctrl-lbl .ctrl-val .btn-group .btn .ask-btn
-.badge .b-blue .b-green .b-amber .b-red .b-gray
-.metric-grid .metric .metric-lbl .metric-val
-.progress-wrap .progress-bar .result-box .result-lbl .result-val .result-sub
-.step-row .step-num .step-title .step-desc .count-lbl .empty
-"""
-
-_SENDPROMPT_RULE = """
-Always define and use this exact bridge function inside <WIDGET>:
-  function sendPrompt(t){window.parent.postMessage({type:"streamlit:setComponentValue",value:t},"*");}
-Every clickable card, row, chip, and button must call sendPrompt with a specific, contextual message.
-"""
-
-_REACTIVE_RUNTIME_RULE = """
-Universal reactive mini-app contract (follow for every widget):
-- Your widget MUST follow this exact execution model:
-  1) Define:
-     - const data = ...      // embedded data derived ONLY from user/context and your <RESPONSE>
-     - const state = {...}   // ALL user inputs (sliders/filters/selections). Initial values must match exact numbers you used in <RESPONSE>.
-  2) Implement:
-     - function compute(state, data) { return {...} }  // pure transforms: filter/aggregate/calc/sort. No network.
-     - function render() { const c = compute(state, data); ... update DOM + chart + table from c ... }
-  3) On load: always call render() once so the widget is never empty.
-  4) On interaction: update state -> call render() immediately (instant UX; never call the LLM on slider drag).
-  5) sendPrompt: ONLY when new knowledge/data is required. Include current state in the prompt.
-
-Charts:
-- Use any public chart/library CDN from cdnjs.cloudflare.com, cdn.jsdelivr.net, unpkg.com, or cdn.plot.ly.
-- Chart backgrounds must be transparent for iframe embedding.
-- ECharts (preferred): https://cdn.jsdelivr.net/npm/echarts/dist/echarts.min.js
-- Plotly, D3, Chart.js, ApexCharts, and other public viz libraries are allowed.
-
-Forbidden (never include):
-- fetch / XMLHttpRequest / WebSocket
-- eval / new Function
-"""
-
-_DYNAMIC_WIDGET_UX_RULE = """
-Dynamic, responsive widgets (not static posters):
-- Layout: use flex/grid with wrap, minmax(), and clamp() so content reflows when the iframe is narrow or wide. Prefer fluid widths (%, fr, max-width) over fixed pixel widths for main columns.
-- Motion & feedback: add CSS transitions on hover/focus for cards, buttons, and controls; subtle transform (translateY) on hover where it aids affordance. Enable chart library animation (e.g. ECharts animation / animationDuration) so series draw in smoothly.
-- Interactivity: expose meaningful controls — tabs, toggles, filters, sliders, dataZoom/brush on charts when data density warrants it. When state changes, re-render charts/tables immediately (same reactive pattern as sliders).
-- Depth: combine visuals (chart + KPI strip + short table + optional image/diagram) when the answer benefits; vary structure by use case instead of repeating one template every turn.
-"""
 
 _OUTPUT_CONTRACT_STRICT = """
 OUTPUT CONTRACT (STRICT — MUST FOLLOW)
@@ -543,85 +477,6 @@ Rules:
 - If widget is warranted, return a valid interactive widget (not placeholders).
 - If widget is not warranted (simple chit-chat / conceptual text-only), return exactly <WIDGET></WIDGET>.
 If you fail to follow this contract, the system will break.
-"""
-
-_LIBRARIES_RULE = """
-Allowed libraries for <WIDGET> — use any public CDN from cdnjs.cloudflare.com, cdn.jsdelivr.net, unpkg.com, or cdn.plot.ly.
-Use whichever library produces the best visual for the use case. You may combine libraries (e.g. ECharts + Tabulator).
-
-Recommended (pick the best fit):
-- ECharts: https://cdn.jsdelivr.net/npm/echarts/dist/echarts.min.js
-- Plotly.js: https://cdn.plot.ly/plotly-2.30.0.min.js
-- D3.js: https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js
-- Chart.js: https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js
-- ApexCharts: https://cdn.jsdelivr.net/npm/apexcharts
-- Tabulator (tables): https://cdn.jsdelivr.net/npm/tabulator-tables/dist/js/tabulator.min.js + CSS
-- Mermaid (flowcharts, sequence diagrams): https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js
-- Three.js (simple 3D): https://cdn.jsdelivr.net/npm/three/build/three.min.js
-
-You may use any other public library from these CDNs. Choose the library that creates the best, most accurate visualization.
-
-Color + theming baseline (applies to every engine):
-- Always define a JS palette (array of hex colors) and apply it explicitly to series/marks.
-- Detect dark mode with: const dark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-- Explicitly set: axis label color, grid line color, legend text color, and tooltip styling.
-
-Library choice guidance (use the best fit; do not force the same layout every time):
-- Time-series trends (date/time x-axis, >=5 points): ECharts line/area + tooltip + subtle dataZoom.
-- Categorical rankings (categories with numeric values): ECharts horizontal bar + click-to-filter + cross-filter table.
-- Composition/share: stacked bars (or 100% stacked) with tooltip value + %; pie/donut only when 3–5 short categories.
-- Distributions:
-  - if you have raw samples: histogram-like bins
-  - if you only have summary stats: do not invent bins; use KPI tiles + short explanation.
-- Correlation/relationship (x-y pairs): ECharts scatter; highlight outliers.
-- Hierarchies: treemap only when parent/child is explicit; otherwise use grouped table.
-- Many series: avoid clutter; use small multiples or series toggles (do not plot >6 lines by default).
-- Tables: Tabulator always for scan/sort/filter when it helps (rows > 8 or user asked for a breakdown).
-- Prose/conceptual answers with no extractable dataset: still generate a widget using illustrative/mock data and label it clearly (e.g. "Example", "Illustrative", "Mock data").
-
-Engine-specific rendering requirements:
-- ECharts: option.backgroundColor must be 'transparent'; set textStyle/axis/grid colors from theme.
-- Plotly: set paper_bgcolor/plot_bgcolor to 'rgba(0,0,0,0)'; set layout.font.color and layout.colorway=palette.
-- D3: create SVG with responsive sizing; set tooltip styles; apply palette for strokes/fills.
-"""
-
-_ANALYTICS_DEFAULTS_RULE = """
-Dashboard decision policy (data-driven; do this internally—do not output the reasoning):
-1) DATASET EXTRACTION:
-   - Prefer data from: (a) user request/context, (b) numeric values in <RESPONSE>.
-   - If sufficient data exists, use it. If not, use illustrative/mock data — but you MUST clearly label it (e.g. "Example data", "Mock data", "Illustrative") in the widget title or a visible subtitle.
-2) DATA-SHAPE DETECTION:
-   - Determine shape: time-series, categorical ranking, composition, distribution, correlation, hierarchy, steps/process, or other.
-3) WIDGET WARRANT:
-   - Generate a widget wherever there is possibility. If extractable data exists, use it.
-   - If no extractable dataset (or too few points): use illustrative/mock data and clearly label it (e.g. "Example data", "Mock data", "Illustrative"). Do NOT return empty <WIDGET></WIDGET> when a chart/calculator/table would help.
-4) BI LAYOUT (only when warranted):
-   - KPI row (3–6 tiles) → optional Controls row → Primary visualization → optional detail table → Insights (2–4).
-5) CROSS-VIEW INTERACTION:
-   - Any filter/control must update KPIs + chart + table from the SAME filtered dataset.
-6) DRILLDOWN LOOP:
-   - Click chart mark / legend / table row → sendPrompt('...') with clicked entity + metric + relevant time window (if present) + current filter summary.
-7) INSIGHT RULE:
-   - Insights must be computed from the dataset in JS (or computed from extracted values). Do not write obvious generic commentary.
-"""
-
-_COLOR_THEMING_RULE = """
-Color & theming (best-in-class readability + polish):
-- You may choose ANY colors, but they MUST remain readable and “enterprise clean”.
-- Detect dark mode with: const dark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-- Create theme tokens in JS:
-  - text = dark ? '#e8eaf4' : '#111318'
-  - text2 = dark ? '#8d93aa' : '#5a5f72'
-  - grid = dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)'
-  - border = dark ? 'rgba(255,255,255,0.10)' : 'rgba(0,0,0,0.10)'
-- Define palette in JS (hex array) and use it explicitly.
-- Deterministic category coloring:
-  - Build `colorMap` from category keys to palette entries (stable ordering).
-  - Reuse the same `colorMap` for KPIs and chart series/marks.
-- Selection/interaction states:
-  - Hover: subtle opacity/brightness change
-  - Selected: stronger accent (thicker stroke/line), not neon
-- Grid/labels must always be visible: explicitly set label/text/grid colors for the chart engine.
 """
 
 # Strict bandit primitive: extra lines for <RESPONSE> when STRICT_PRIMITIVES is on (prompt-only).
@@ -647,8 +502,8 @@ _STRICT_PRIMITIVE_EXTRAS: dict[str, str] = {
         "No section titles, bullets, or paragraphs outside the table. Do not put JSON in <RESPONSE>."
     ),
     "visualization": (
-        "Output ONLY one markdown fenced code block (triple backticks). Inside: ASCII bar chart (#) and/or "
-        "aligned text columns. Do not put raw JSON in <RESPONSE>. No prose outside that single code block."
+        "Write a brief 1-2 sentence lead-in only. The <WIDGET> carries the actual visual. "
+        "NEVER draw ASCII charts, tree diagrams (├──), or text-art, and never put code blocks or JSON in <RESPONSE>."
     ),
 }
 
@@ -704,7 +559,6 @@ def build_combined_system_prompt(
     format_rule: str,
     primitive_extra_context: str,
     user_message: str,
-    widget_required: bool = True,
     forbidden_components: list[str] | None = None,
     required_components: list[str] | None = None,
 ) -> str:
@@ -765,58 +619,12 @@ The user's message is only a greeting, thanks, acknowledgement, or goodbye.
 ═══════════════════════════════════════════════════════
 """
 
-    widget_mode = getattr(config, "WIDGET_MODE", "json").strip().lower()
-    widget_format_line = (
-        "Complete self-contained HTML document for the interactive widget"
-        if widget_mode != "json"
-        else "JSON UI schema ONLY (no HTML) for the widget"
-    )
-
-    widget_rules_header = (
-        "WIDGET RULES — for the HTML inside <WIDGET>"
-        if widget_mode != "json"
-        else "WIDGET RULES — for the JSON schema inside <WIDGET>"
-    )
-
-    widget_requirement_block = (
-        "WIDGET REQUIRED for this user turn: return a NON-EMPTY widget."
-        if widget_required
-        else "WIDGET OPTIONAL for this user turn: return <WIDGET></WIDGET> if the turn is better as text-only."
-    )
-
-    widget_rules_body = (
-        f"""- Hard output contract (never violate):
-  - You MUST output BOTH tags exactly once: <RESPONSE>...</RESPONSE> and <WIDGET>...</WIDGET>.
-  - Never omit <WIDGET> tags. For text-only turns, output `<WIDGET></WIDGET>`.
-- {widget_requirement_block}
-- Choose the UI based on the content in <RESPONSE> (data-driven). Do not follow any fixed template.
-- IMPORTANT: In HTML mode, the content inside <WIDGET> MUST be HTML (not JSON). It must contain opening <html> and closing </html>.
-- Return a COMPLETE, self-contained HTML document (opening <html> to closing </html>).
-- Inline ALL CSS in <style> and ALL JS in <script>. External files: use any public CDN (cdnjs, jsdelivr, unpkg, cdn.plot.ly) for charts, tables, and other libraries.
-- Visuals — use freely when they clarify the answer: <img> (https:// or data:image/...), inline <svg>, <figure>/<figcaption>, <picture>, <canvas> for drawings, and background-image in CSS (url() to https or data URIs). For diagrams/flowcharts you may embed SVG markup or use canvas/D3/Mermaid via CDN. Attribute image sources when the license requires it.
-- {_LIBRARIES_RULE.strip()}
-- {_ANALYTICS_DEFAULTS_RULE.strip()}
-- {_COLOR_THEMING_RULE.strip()}
-- No frameworks (React/Vue/jQuery). Plain HTML + CSS + JS only.
-- body background must be transparent (background:transparent!important).
-- No position:fixed anywhere.
-- Wrap content in <div class="widget-root">.
-- No markdown fences/backticks inside <WIDGET>. Use ONLY raw HTML/CSS/JS.
-- Always call your main render/calc function once on page load so output is never empty (e.g., call `init()` or `render()` at the end of <script>).
-- Charts/tables must be drawn from the embedded dataset immediately after the first render call.
-- {_DYNAMIC_WIDGET_UX_RULE.strip()}
-- Slider/input changes → local calc() only (never sendPrompt on drag).
-- Slider initial values MUST match the exact numbers in your <RESPONSE>. Never invent defaults.
-- Use 0.5px solid borders — never 1px solid.
-- UI (HTML/CSS): use CSS variables only (no hardcoded hex/rgb). Charts (ECharts/Plotly/Chart.js): you MAY use hex colors in JS configs for palettes/series.
-- NO EMOJIS — never use emojis in widgets or labels. Use text only.
-- Neat and clean for any data: light backgrounds (#F5F5F5, #F2F2F2), clear typography, generous spacing. Minimal, professional layout. No decorative icons or clutter.
-{_REACTIVE_RUNTIME_RULE}
-{_DESIGN_SYSTEM_REMINDER}
-{_SENDPROMPT_RULE}"""
-        if widget_mode != "json"
-        else build_json_widget_rule()
-    )
+    # Components-only / JSON schema mode is the only mode. The widget vocabulary,
+    # warrant rubric, strict grounding, and decline rules all come from the registry
+    # (build_json_widget_rule → widget-registry.json). No HTML, no external libraries.
+    widget_format_line = "JSON UI schema ONLY (no HTML) for the widget"
+    widget_rules_header = "WIDGET RULES — for the JSON schema inside <WIDGET>"
+    widget_rules_body = build_json_widget_rule()
 
     combined_max_tokens = getattr(config, "COMBINED_MAX_TOKENS", 7500)
     token_limit_block = f"""
@@ -826,49 +634,14 @@ TOKEN LIMIT — you have ~{combined_max_tokens} tokens total for <RESPONSE> + <W
 - For comparison tables in <RESPONSE>: keep focused so the widget has room. Both must fit.
 """
 
-    return f"""You are an expert AI assistant with rich, dynamic interactive output — widgets should feel alive, responsive, and tailored to each question (not repetitive templates).
+    return f"""You are an expert AI assistant. Each turn you produce a written answer AND an OPTIONAL interactive widget built ONLY from a fixed set of UI components defined below — there is NO HTML and NO external charting libraries.
 {social_turn_banner}
 Output style: No emojis. Neat, clean, professional — in both <RESPONSE> text and <WIDGET>.
 {token_limit_block}
 {_OUTPUT_CONTRACT_STRICT}
 
-For every response you produce TWO sections in one generation.
-The widget block may be empty for text-only turns where interactivity is not helpful.
+For every turn you produce TWO sections in one generation: the <RESPONSE> text first, then the <WIDGET>. The widget may be empty when a visual is not warranted (see WIDGET WARRANT below). Never describe a widget you did not produce (e.g. don't write "the dashboard below" and then return an empty widget).
 
-CRITICAL — Never describe a widget you do not generate. If your <RESPONSE> mentions "the dashboard below", "interactive chart", "explore visually", or anything that implies a visualization exists, you MUST output a complete, non-empty <WIDGET>. Do NOT say "the dashboard below" if you return empty <WIDGET></WIDGET>. Either generate the full widget HTML or do not mention it in the text at all.
-
-Only return an EMPTY widget block (<WIDGET></WIDGET>) when the turn is not “widget-worthy”:
-- greetings (hi, hello, hey), acknowledgements (thanks, ok, got it), goodbyes (bye, goodbye), pure chit-chat — on these turns do NOT apply the bandit Strategy/Rule to <RESPONSE>; use a short natural reply
-- conceptual Q&A with no dataset/comparison/actionable metrics
-- planning/roadmap/implementation-step requests where prose is the primary output
-
-Infer from the user's question and your <RESPONSE> content whether a widget would help. If your <RESPONSE> has structure, numbers, comparisons, or decision support, generate the best-fit widget.
-
-Widget warrant decision checklist:
-- Generate NON-EMPTY widget if the user asks for charts, dashboard, analytics, comparison, trends, KPIs, forecasting, ranking, tabular breakdown, numeric exploration, diagrams, illustrations, or images that support the answer.
-- Generate NON-EMPTY widget if your response includes measurable values that benefit from visual or interactive interpretation.
-- Return EMPTY widget for pure explanation/definition/planning where a chart would be decorative noise.
-
-Understand the user's intent. When the question implies visualization, calculation, comparison, or learning, generate a NON-EMPTY <WIDGET>.
-
-Chart/visual selection — pick the right type for the data and use case:
-| Data / use case | Best widget type | Library |
-|-----------------|------------------|---------|
-| Time-series, trends | Line or area chart | ECharts, Plotly, Chart.js |
-| Categorical comparison | Bar chart (horizontal) | ECharts, Chart.js, ApexCharts |
-| Part of whole | Pie, donut, stacked bar | ECharts, Chart.js |
-| Correlation, x-y | Scatter plot | ECharts, Plotly, D3 |
-| Adjustable numbers, formulas | Interactive calculator with sliders | Plain JS + Chart.js/ECharts |
-| Rows > 8, breakdown | Tabulator table | Tabulator |
-| KPI metrics | KPI tiles + optional chart | CSS + ECharts |
-| Process, flow | Diagram, sankey, funnel | D3, ECharts |
-| Photo, illustration, icon | <img> / inline SVG / image block (JSON) | https or data URI |
-
-Libraries: ECharts (cdn.jsdelivr.net/npm/echarts), Plotly (cdn.plot.ly), Chart.js (cdnjs), Tabulator (tabulator.info). Pick what fits.
-
-One chart vs multiple: Use one chart/widget when it suffices. Add more only when each adds distinct value. Never duplicate the same data in multiple chart types.
-
-CRITICAL — Complete the widget: Never truncate or stop mid-generation. The <WIDGET> must be a complete, functional HTML document. If space is tight, shorten <RESPONSE> — the widget must always finish.
 ═══════════════════════════════════════════════════════
 OUTPUT FORMAT — always use exactly this structure
 ═══════════════════════════════════════════════════════
@@ -885,35 +658,18 @@ RESPONSE FORMAT RULE — {response_rule_line}
 Strategy: {strategy_id}
 Rule: {format_rule}
 Do not mention this rule. Do not add <WIDGET> inside <RESPONSE>.
+<RESPONSE> is prose for the user — NEVER put JSON, a widget schema, block objects, or code fences in it. All structured data goes ONLY inside <WIDGET>.
+NEVER draw visuals as text in <RESPONSE>: no ASCII charts/bars, no tree drawings (├──, └──), no aligned-column tables-as-art. The <WIDGET> is the ONLY place a visualization lives. For a hierarchy/mind map, put it in a chart block with "kind":"tree"|"mindmap"|"org" and a "root", not as text.
 CRITICAL — Primitives vs Widget (never confuse these):
 - The Strategy/Rule above applies ONLY to <RESPONSE> (text format: bullets, table, prose, etc.). It does NOT constrain <WIDGET>.
-- <WIDGET> is SEPARATE and INDEPENDENT. Generate a widget wherever there is possibility, based on content — never skip a widget because the text format is "table" or "prose". Widget choice (chart, calculator, table) depends on content, not on the primitive.
+- <WIDGET> is SEPARATE and INDEPENDENT. Widget choice depends on the content of your <RESPONSE>, not on the text format.
 
 ═══════════════════════════════════════════════════════
 {widget_rules_header}
 ═══════════════════════════════════════════════════════
 {widget_rules_body}
 {widget_block}
-{constraint_block}
-═══════════════════════════════════════════════════════
-DATA GROUNDING — most critical quality rule
-═══════════════════════════════════════════════════════
-Every entity, name, number, ticker, percentage shown in the widget MUST come from either:
-  - the numeric values you extracted from the user request/context, OR
-  - the numeric values present in your <RESPONSE>, OR
-  - (for educational/concept demos only) reasonable illustrative values you choose (e.g. P=1000, r=5%, t=10 for compound interest).
-- Use meaningful labels (Principal, Rate, Years). When using mock data, clearly label it (e.g. "Example", "Mock data").
-- When real data is missing: you MAY use illustrative/mock data; label it clearly in the widget.
-- Prefer data from <RESPONSE> or user context; when unavailable, use mock/illustrative data and label it.
-- When using mock/illustrative data (dates, tickers, values), label it clearly “e.g. Example data, Mock data”.
-
-═══════════════════════════════════════════════════════
-sendPrompt specificity — always specific, never generic
-═══════════════════════════════════════════════════════
-GOOD: sendPrompt('What are the risks of VTI at 0.03% expense ratio?')
-BAD:  sendPrompt('Tell me more')
-BAD:  sendPrompt('Click for details')
-"""
+{constraint_block}"""
 
 
 def build_combined_user_prompt(
@@ -963,23 +719,10 @@ def parse_combined_output(raw: str) -> Tuple[str, str]:
         else:
             response_text = raw.strip()
 
-    # Extract <WIDGET>...</WIDGET>
+    # Extract <WIDGET>...</WIDGET> — JSON schema only (no HTML mode).
     widget_match = re.search(r"<WIDGET>(.*?)</WIDGET>", raw, re.DOTALL | re.IGNORECASE)
     if widget_match:
         raw_widget = widget_match.group(1).strip()
-
-        widget_mode = getattr(config, "WIDGET_MODE", "json").strip().lower()
-        if widget_mode == "json":
-            widget_payload = finalize_widget_schema_json(raw_widget)
-        else:
-            # HTML mode: strip markdown fences if model wrapped widget in ```...```
-            if "```" in raw_widget:
-                fence = re.search(r"```(?:json|html)?\s*(.*?)```", raw_widget, re.DOTALL | re.IGNORECASE)
-                raw_widget = fence.group(1).strip() if fence else re.sub(r"```\w*", "", raw_widget).strip()
-            if "<" in raw_widget and ">" in raw_widget:
-                if "<html" not in raw_widget.lower():
-                    raw_widget = f"<html><head></head><body>{raw_widget}</body></html>"
-                raw_widget = re.sub(r"<!DOCTYPE[^>]*>", "", raw_widget, flags=re.IGNORECASE).strip()
-                widget_payload = inject_design_system(raw_widget)
+        widget_payload = finalize_widget_schema_json(raw_widget)
 
     return response_text, widget_payload

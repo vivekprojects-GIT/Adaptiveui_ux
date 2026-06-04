@@ -13,13 +13,17 @@ import Button from '@/components/ui/Button.vue'
 import { ArrowDownTrayIcon } from '@/components/icons'
 import { resolveWidget } from '@/lib/widgetRegistry'
 import { normalizeWidgetBlock } from '@/lib/progressiveWidget'
+import { chartHasRenderableData } from '@/lib/echartsOption'
 import { downloadTextAsFile, prettifyJsonIfPossible } from '@/lib/downloadFile'
+import { widgetToHtml } from '@/lib/exportWidgetHtml'
 import { showToast } from '@/lib/toast'
 
 const props = withDefaults(
-  defineProps<{ jsonStr: string; downloadBase?: string; showDownload?: boolean }>(),
-  { showDownload: true },
+  defineProps<{ jsonStr: string; downloadBase?: string; showDownload?: boolean; streaming?: boolean }>(),
+  { showDownload: true, streaming: false },
 )
+// Bubbles up action_row button clicks (the follow-up prompt text) to the chat.
+const emit = defineEmits<{ (e: 'action', text: string): void }>()
 
 type Block = Record<string, unknown> & { type?: string }
 
@@ -29,22 +33,87 @@ function stripFences(s: string): string {
   return s.replace(/```\w*/g, '').trim()
 }
 
+/**
+ * Salvage complete block objects from a truncated/invalid layout string.
+ * Walks the `layout` array brace-by-brace (string-aware) and keeps every fully
+ * closed `{...}` object that has a `type`. A cut-off final object is dropped.
+ * This guarantees we NEVER fall back to dumping raw JSON to the user.
+ */
+function salvageBlocks(s: string): Block[] {
+  const li = s.search(/"(?:layout|blocks|components)"\s*:\s*\[/)
+  let start = li >= 0 ? s.indexOf('[', li) + 1 : s.indexOf('[')
+  if (start <= 0) return []
+  const out: Block[] = []
+  const n = s.length
+  let i = start
+  while (i < n) {
+    while (i < n && s[i] !== '{') {
+      if (s[i] === ']') return out
+      i++
+    }
+    if (i >= n) break
+    let depth = 0
+    let inStr = false
+    let esc = false
+    let j = i
+    for (; j < n; j++) {
+      const ch = s[j]
+      if (inStr) {
+        if (esc) esc = false
+        else if (ch === '\\') esc = true
+        else if (ch === '"') inStr = false
+      } else if (ch === '"') inStr = true
+      else if (ch === '{') depth++
+      else if (ch === '}') {
+        depth--
+        if (depth === 0) {
+          j++
+          break
+        }
+      }
+    }
+    if (depth !== 0) break // incomplete (truncated) object → stop salvaging
+    try {
+      const o = JSON.parse(s.slice(i, j))
+      if (o && typeof o === 'object' && typeof o.type === 'string') out.push(o as Block)
+    } catch {
+      /* skip unparseable element */
+    }
+    i = j
+  }
+  return out
+}
+
+function finalizeBlocks(layout: unknown[]): Block[] {
+  const normalized = layout.map((b) => normalizeWidgetBlock(b)) as Block[]
+  // Drop bare numeric-array text blocks (e.g. tic-tac-toe win lines "[0,1,2]") — not real content.
+  const NUMERIC_ARRAY_RE = /^\s*\[\s*-?\d+(\.\d+)?(\s*,\s*-?\d+(\.\d+)?)*\s*\]\s*$/
+  return normalized.filter((b) => {
+    const type = String(b.type || '').toLowerCase()
+    // Never show an empty chart card — drop charts with no renderable data outright.
+    if (type === 'chart' && !chartHasRenderableData((b as { chart?: any }).chart || {})) return false
+    if (type === 'text' && NUMERIC_ARRAY_RE.test(String((b as { content?: string }).content ?? ''))) return false
+    return true
+  })
+}
+
 function parseLayout(raw: string): Block[] | null {
   let s = String(raw || '').trim()
   if (!s) return null
   if (s.includes('```')) s = stripFences(s)
 
-  let parsed: unknown
+  let parsed: unknown = null
   try {
     parsed = JSON.parse(s)
   } catch {
     const i = s.indexOf('{')
     const j = s.lastIndexOf('}')
-    if (i < 0 || j <= i) return null
-    try {
-      parsed = JSON.parse(s.slice(i, j + 1))
-    } catch {
-      return null
+    if (i >= 0 && j > i) {
+      try {
+        parsed = JSON.parse(s.slice(i, j + 1))
+      } catch {
+        parsed = null
+      }
     }
   }
 
@@ -56,17 +125,14 @@ function parseLayout(raw: string): Block[] | null {
     layout = o.layout ?? o.blocks ?? o.components
     if (!Array.isArray(layout) && typeof o.type === 'string') layout = [o]
   }
-  if (!Array.isArray(layout)) return null
-  const normalized = (layout as unknown[]).map((b) => normalizeWidgetBlock(b)) as Block[]
-  // Drop bare numeric-array text blocks (e.g. tic-tac-toe win lines "[0,1,2]") — not real content.
-  const NUMERIC_ARRAY_RE = /^\s*\[\s*-?\d+(\.\d+)?(\s*,\s*-?\d+(\.\d+)?)*\s*\]\s*$/
-  return normalized.filter(
-    (b) =>
-      !(
-        String(b.type || '').toLowerCase() === 'text' &&
-        NUMERIC_ARRAY_RE.test(String((b as { content?: string }).content ?? ''))
-      ),
-  )
+
+  if (Array.isArray(layout)) return finalizeBlocks(layout as unknown[])
+
+  // Clean parse failed (likely truncated stream) — salvage whatever complete blocks exist
+  // instead of dumping raw JSON to the user.
+  const salvaged = salvageBlocks(s)
+  if (salvaged.length) return finalizeBlocks(salvaged)
+  return null
 }
 
 const parsed = computed(() => parseLayout(props.jsonStr))
@@ -95,20 +161,41 @@ function downloadJson() {
   }
   downloadTextAsFile(prettifyJsonIfPossible(raw), `${downloadStem()}.json`, 'application/json;charset=utf-8')
 }
+
+function downloadHtml() {
+  const raw = String(props.jsonStr || '').trim()
+  if (!raw) {
+    showToast({ title: 'Nothing to download', message: 'Widget is empty.' })
+    return
+  }
+  // Deterministic, no LLM: same JSON the renderer uses → self-contained interactive HTML.
+  const html = widgetToHtml(raw, downloadStem())
+  downloadTextAsFile(html, `${downloadStem()}.html`, 'text/html;charset=utf-8')
+}
 </script>
 
 <template>
   <div class="space-y-2">
-    <div v-if="showDownload && hasRaw" class="flex justify-end">
+    <div v-if="showDownload && hasRaw" class="flex justify-end gap-1.5">
       <Button
         type="button"
         variant="outline"
         size="sm"
-        class="h-7 px-2"
+        class="h-7 px-2 text-[11px]"
+        title="Download as a self-contained interactive HTML file"
+        @click="downloadHtml"
+      >
+        <ArrowDownTrayIcon class="h-3.5 w-3.5" /> HTML
+      </Button>
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        class="h-7 px-2 text-[11px]"
         title="Download widget schema as JSON"
         @click="downloadJson"
       >
-        <ArrowDownTrayIcon class="h-3.5 w-3.5" />
+        <ArrowDownTrayIcon class="h-3.5 w-3.5" /> JSON
       </Button>
     </div>
 
@@ -125,6 +212,7 @@ function downloadJson() {
             :is="resolve(block.type)!.component"
             v-if="resolve(block.type)"
             :block="block"
+            @action="(t: string) => emit('action', t)"
           />
           <div
             v-else
@@ -142,14 +230,13 @@ function downloadJson() {
       </template>
     </div>
 
+    <!-- While streaming, stay quiet until the first block completes (panel header shows "building live"). -->
     <div
-      v-else-if="parseFailed"
+      v-else-if="parseFailed && !streaming"
       class="rounded-lg border border-dashed border-amber-500/40 bg-amber-500/5 px-3 py-3 text-xs text-muted-foreground"
     >
-      <p class="font-medium text-foreground/90 mb-1">Could not parse widget JSON</p>
-      <pre class="max-h-48 overflow-auto whitespace-pre-wrap break-all text-[10px] leading-snug">{{
-        props.jsonStr.slice(0, 2000)
-      }}</pre>
+      <!-- Never dump raw JSON to the user — show a friendly note only. -->
+      The widget couldn’t be built for this answer. Try rephrasing or ask again.
     </div>
   </div>
 </template>

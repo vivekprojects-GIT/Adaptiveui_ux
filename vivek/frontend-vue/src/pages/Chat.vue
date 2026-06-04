@@ -8,8 +8,6 @@ import Button from '@/components/ui/Button.vue'
 import PreferenceModal from '@/components/PreferenceModal.vue'
 import TechPanels from '@/components/TechPanels.vue'
 import WidgetSchemaRenderer from '@/components/WidgetRegistryRenderer.vue'
-import LiveWidgetSchema from '@/components/LiveWidgetSchema.vue'
-import LiveWidgetFrame from '@/components/LiveWidgetFrame.vue'
 import { getAccessToken, clearAccessToken } from '@/lib/auth'
 import { ingestDone, ingestReward } from '@/lib/analyticsStore'
 import {
@@ -86,43 +84,10 @@ function schemaIsOnlyNumericTupleText(wSch: string): boolean {
   }
 }
 
-function streamLooksLikeSubstantialHtml(s: string): boolean {
-  const low = s.toLowerCase()
-  if (low.includes('<!doctype') || low.includes('<html')) return true
-  return (
-    low.includes('<div') &&
-    (low.includes('<script') || low.includes('onclick=') || low.includes('<button'))
-  )
-}
-
-function extractHtmlDocumentFromStream(s: string): string {
-  const low = s.toLowerCase()
-  const iDoc = low.indexOf('<!doctype')
-  const iHtml = low.indexOf('<html')
-  let i = iDoc >= 0 ? iDoc : iHtml
-  if (i < 0) {
-    const div = low.indexOf('<div')
-    if (div < 0) return ''
-    i = div
-  }
-  const end = low.lastIndexOf('</html>')
-  if (end >= i && end >= 0) return s.slice(i, end + '</html>'.length)
-  return s.slice(i)
-}
-
-/** Drop useless index-array "widgets"; pull real HTML from the raw stream if the model mixed outputs. */
+/** Drop useless index-array "widgets" (e.g. bare [0,1,2] tuples) that aren't real content. */
 function recoverWidgetFromStreamIfDegenerate(cur: ChatMessage) {
-  const stream = String(cur.widgetStream || '').trim()
   const sch = String(cur.widgetSchema || '').trim()
-  if (!schemaIsOnlyNumericTupleText(sch)) return
-  cur.widgetSchema = ''
-  if (String(cur.widgetHtml || '').trim()) return
-  if (!stream || !streamLooksLikeSubstantialHtml(stream)) return
-  const html = extractHtmlDocumentFromStream(stream).trim()
-  if (html) {
-    cur.widgetHtml = html
-    cur.widgetMode = 'html'
-  }
+  if (schemaIsOnlyNumericTupleText(sch)) cur.widgetSchema = ''
 }
 
 const isStreaming = ref(false)
@@ -136,12 +101,11 @@ type ChatMessage = {
   content: string
   strategy?: string
   xVec?: number[]
-  widgetHtml?: string
   widgetSchema?: string
   widgetHeight?: number
   widgetStream?: string
   widgetStreaming?: boolean
-  widgetMode?: 'json' | 'html' | ''
+  widgetMode?: 'json' | ''
   rewardUsedUp?: boolean
   rewardUsedDown?: boolean
 }
@@ -151,7 +115,6 @@ type ChatApiSuccess = {
   response?: string
   strategy?: string
   x_vec?: unknown[]
-  widget_html?: string
   widget_schema?: string
   widget_height?: number
   instruction?: string
@@ -429,7 +392,6 @@ async function runChatFallback(text: string, idx: number): Promise<boolean> {
   )
   cur.strategy = typeof payload.strategy === 'string' ? payload.strategy : String(payload.strategy ?? '')
   cur.xVec = Array.isArray(payload.x_vec) ? payload.x_vec.map((n: unknown) => Number(n)) : []
-  cur.widgetHtml = typeof payload.widget_html === 'string' ? payload.widget_html : ''
   cur.widgetSchema = typeof payload.widget_schema === 'string' ? payload.widget_schema : ''
   if (schemaIsOnlyNumericTupleText(cur.widgetSchema)) cur.widgetSchema = ''
   cur.widgetHeight = payload.widget_height ? Number(payload.widget_height) : 420
@@ -466,7 +428,7 @@ async function runChatFallback(text: string, idx: number): Promise<boolean> {
   ingestDone({
     strategy: payload.strategy ?? 'unknown',
     elapsed: payload.elapsed,
-    widget_html: payload.widget_html ?? '',
+    widget_schema: payload.widget_schema ?? '',
   })
   return true
 }
@@ -524,8 +486,7 @@ function handleSseEvent(evt: Record<string, unknown>, idx: number) {
       cur.widgetStreaming = true
       if (!cur.widgetMode) {
         const preview = cur.widgetStream.slice(0, 400).trim().toLowerCase()
-        if (preview.startsWith('<') || preview.startsWith('<!doctype')) cur.widgetMode = 'html'
-        else if (preview.startsWith('{') || preview.startsWith('[') || preview.startsWith('```json')) cur.widgetMode = 'json'
+        if (preview.startsWith('{') || preview.startsWith('[') || preview.startsWith('```json')) cur.widgetMode = 'json'
       }
       requestAdaptiveAutoScroll()
     }
@@ -539,7 +500,6 @@ function handleSseEvent(evt: Record<string, unknown>, idx: number) {
     const e = evt as {
       response?: string
       strategy?: string
-      widget_html?: string
       widget_schema?: string
       widget_height?: number
       x_vec?: number[]
@@ -555,32 +515,20 @@ function handleSseEvent(evt: Record<string, unknown>, idx: number) {
     }
     cur.content = cleanAssistantText(e.response ?? cur.content)
     cur.strategy = e.strategy ?? cur.strategy
-    const wHtml = typeof e.widget_html === 'string' ? e.widget_html.trim() : ''
-    const wSch = typeof e.widget_schema === 'string' ? e.widget_schema.trim() : ''
-    cur.widgetHtml = wHtml
-    cur.widgetSchema = wSch
+    cur.widgetSchema = typeof e.widget_schema === 'string' ? e.widget_schema.trim() : ''
     cur.widgetHeight = e.widget_height ? Number(e.widget_height) : 420
     cur.widgetStreaming = false
 
     recoverWidgetFromStreamIfDegenerate(cur)
 
-    // If the server omits or clears finalized widget fields but we already streamed
-    // payload into `widgetStream`, promote that stream into the final slot. Otherwise
-    // the live panel hides (widgetStreaming=false) and the final iframe/schema panel
-    // never mounts — looks like the widget "disappeared" after completion.
+    // If the server cleared the finalized schema but we already streamed JSON into
+    // `widgetStream`, promote that stream so the panel still mounts (avoids the
+    // "widget disappeared after completion" symptom).
     const stream = String(cur.widgetStream || '').trim()
-    if (!cur.widgetHtml && !cur.widgetSchema && stream) {
-      let mode = cur.widgetMode || ''
-      if (!mode) {
-        const preview = stream.slice(0, 400).trim().toLowerCase()
-        if (preview.startsWith('<') || preview.startsWith('<!doctype')) mode = 'html'
-        else if (preview.startsWith('{') || preview.startsWith('[') || preview.startsWith('```json')) mode = 'json'
-      }
-      if (mode === 'html') cur.widgetHtml = stream
-      else if (!schemaIsOnlyNumericTupleText(stream)) cur.widgetSchema = stream
-      if (mode && (cur.widgetHtml || cur.widgetSchema)) cur.widgetMode = mode as 'json' | 'html' | ''
+    if (!cur.widgetSchema && stream && !schemaIsOnlyNumericTupleText(stream)) {
+      cur.widgetSchema = stream
     }
-    if (!cur.widgetHtml?.trim() && !cur.widgetSchema?.trim()) cur.widgetMode = ''
+    cur.widgetMode = cur.widgetSchema?.trim() ? 'json' : ''
     cur.xVec = Array.isArray(e.x_vec) ? e.x_vec.map((n) => Number(n)) : []
     cur.rewardUsedUp = false
     cur.rewardUsedDown = false
@@ -618,9 +566,17 @@ function handleSseEvent(evt: Record<string, unknown>, idx: number) {
     ingestDone({
       strategy: e.strategy ?? cur.strategy ?? 'unknown',
       elapsed: e.elapsed,
-      widget_html: e.widget_html ?? '',
+      widget_schema: e.widget_schema ?? '',
     })
   }
+}
+
+/** An action_row button was clicked — send its label as the next prompt. */
+function onWidgetAction(text: string) {
+  const t = String(text || '').trim()
+  if (!t || sending.value || isStreaming.value) return
+  input.value = t
+  void onSend()
 }
 
 async function onSend() {
@@ -721,22 +677,13 @@ async function onSend() {
         if (evt.type === 'done') {
           finalized = true
           const cur = messages.value[idx]
-          // Redundant safety: promote streamed widget if done payload left both empty.
-          const wHtml = typeof (evt as { widget_html?: string }).widget_html === 'string' ? (evt as { widget_html: string }).widget_html.trim() : ''
+          // Redundant safety: promote streamed JSON if the done payload left the schema empty.
           const wSch = typeof (evt as { widget_schema?: string }).widget_schema === 'string' ? (evt as { widget_schema: string }).widget_schema.trim() : ''
           const stream = String(cur.widgetStream || '').trim()
-          if (!wHtml && !wSch && stream) {
-            let mode = cur.widgetMode || ''
-            if (!mode) {
-              const preview = stream.slice(0, 400).trim().toLowerCase()
-              if (preview.startsWith('<') || preview.startsWith('<!doctype')) mode = 'html'
-              else if (preview.startsWith('{') || preview.startsWith('[') || preview.startsWith('```json')) mode = 'json'
-            }
-            if (mode === 'html') cur.widgetHtml = stream
-            else if (!schemaIsOnlyNumericTupleText(stream)) cur.widgetSchema = stream
-            if (mode && (cur.widgetHtml || cur.widgetSchema)) cur.widgetMode = mode as 'json' | 'html' | ''
+          if (!wSch && stream && !schemaIsOnlyNumericTupleText(stream)) {
+            cur.widgetSchema = stream
           }
-          if (!cur.widgetHtml?.trim() && !cur.widgetSchema?.trim()) cur.widgetMode = ''
+          cur.widgetMode = cur.widgetSchema?.trim() ? 'json' : ''
           recoverWidgetFromStreamIfDegenerate(cur)
         }
       }
@@ -773,13 +720,11 @@ async function onSend() {
 type HistoryPair = {
   user: string
   assistant: string
-  widget_html?: string
   widget_schema?: string
   widget_height?: number
 }
 
 function assistantFromHistoryPair(p: HistoryPair): ChatMessage {
-  const wHtml = String(p.widget_html ?? '').trim()
   const wSch = String(p.widget_schema ?? '').trim()
   const wh = Number(p.widget_height) || 420
   const base: ChatMessage = {
@@ -787,10 +732,7 @@ function assistantFromHistoryPair(p: HistoryPair): ChatMessage {
     content: cleanAssistantText(p.assistant),
     widgetHeight: wh,
   }
-  if (wHtml) {
-    base.widgetHtml = wHtml
-    base.widgetMode = 'html'
-  } else if (wSch && !schemaIsOnlyNumericTupleText(wSch)) {
+  if (wSch && !schemaIsOnlyNumericTupleText(wSch)) {
     base.widgetSchema = wSch
     base.widgetMode = 'json'
   }
@@ -902,10 +844,59 @@ watch(isStreaming, (v) => {
   else killAnimationsOf(streamPulseEl.value)
 })
 
+/**
+ * Strip any widget JSON the model leaked into the prose <RESPONSE>. The response is
+ * meant to be human text only — JSON must NEVER reach the UI. Handles fenced blocks and
+ * bare objects/arrays (balanced or truncated mid-stream).
+ */
+function stripLeakedJson(text: string): string {
+  let s = text
+  // 1) fenced code blocks whose content looks like widget JSON
+  s = s.replace(/```[\w-]*\s*([\s\S]*?)```/g, (m, inner) => {
+    const t = String(inner).trim()
+    return /^[[{]/.test(t) && /"(?:type|layout|items|tone|series|chart|version)"/.test(t) ? '' : m
+  })
+  // 2) bare JSON widget/block blobs — balance-match (string-aware); truncated → cut to end
+  const opener = /[{[]/g
+  let match: RegExpExecArray | null
+  while ((match = opener.exec(s)) !== null) {
+    const start = match.index
+    const head = s.slice(start, start + 400)
+    if (!/"(?:type|layout|version)"\s*:/.test(head)) continue
+    const open = s[start]
+    const close = open === '{' ? '}' : ']'
+    let depth = 0
+    let inStr = false
+    let esc = false
+    let j = start
+    for (; j < s.length; j++) {
+      const ch = s[j]
+      if (inStr) {
+        if (esc) esc = false
+        else if (ch === '\\') esc = true
+        else if (ch === '"') inStr = false
+      } else if (ch === '"') inStr = true
+      else if (ch === open) depth++
+      else if (ch === close) {
+        depth--
+        if (depth === 0) {
+          j++
+          break
+        }
+      }
+    }
+    const end = depth !== 0 ? s.length : j // unbalanced (truncated) → remove to end
+    s = s.slice(0, start) + s.slice(end)
+    opener.lastIndex = start
+  }
+  return s
+}
+
 function cleanAssistantText(raw: string | undefined | null) {
   const s = String(raw ?? '')
   const noWidgetBlock = s.replace(/<WIDGET>[\s\S]*?<\/WIDGET>/gi, '')
-  return noWidgetBlock.replace(/<\/?WIDGET>/gi, '').trim()
+  const noTags = noWidgetBlock.replace(/<\/?WIDGET>/gi, '')
+  return stripLeakedJson(noTags).trim()
 }
 
 /**
@@ -957,24 +948,9 @@ function onAdaptiveScroll() {
   adaptiveStickToBottom.value = isNearBottom(adaptiveScrollEl.value)
 }
 
-function widgetFrameHeight(height?: number): number {
-  const raw = Number(height || 420)
-  if (!Number.isFinite(raw)) return 420
-  return Math.min(Math.max(raw, 300), 520)
-}
-
 function widgetDownloadBase(m: ChatMessage, idx: number): string {
   const part = (m.strategy || 'adaptive').replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/^-|-$/g, '').slice(0, 32) || 'widget'
   return `widget-${part}-${idx + 1}`
-}
-
-function downloadWidgetHtml(html: string, base: string) {
-  const body = String(html || '').trim()
-  if (!body) {
-    showToast({ title: 'Nothing to download', message: 'Widget HTML is empty.' })
-    return
-  }
-  downloadTextAsFile(body, `${base}.html`, 'text/html;charset=utf-8')
 }
 
 function downloadWidgetJson(jsonStr: string, base: string) {
@@ -986,27 +962,13 @@ function downloadWidgetJson(jsonStr: string, base: string) {
   downloadTextAsFile(body, `${base}.json`, 'application/json;charset=utf-8')
 }
 
-function effectiveStreamWidgetMode(m: ChatMessage): 'html' | 'json' {
-  if (m.widgetMode === 'html') return 'html'
-  if (m.widgetMode === 'json') return 'json'
-  const preview = String(m.widgetStream || '').slice(0, 400).trim().toLowerCase()
-  if (preview.startsWith('<') || preview.startsWith('<!doctype')) return 'html'
-  return 'json'
-}
-
 function downloadLiveWidgetDraft(m: ChatMessage, idx: number) {
   const stream = String(m.widgetStream || '').trim()
   if (!stream) {
     showToast({ title: 'Nothing to download', message: 'Widget is still loading.' })
     return
   }
-  const base = `${widgetDownloadBase(m, idx)}-draft`
-  if (effectiveStreamWidgetMode(m) === 'html') downloadWidgetHtml(stream, base)
-  else downloadWidgetJson(stream, base)
-}
-
-function downloadFinalWidgetHtml(m: ChatMessage, idx: number) {
-  downloadWidgetHtml(m.widgetHtml || '', widgetDownloadBase(m, idx))
+  downloadWidgetJson(stream, `${widgetDownloadBase(m, idx)}-draft`)
 }
 </script>
 
@@ -1153,10 +1115,10 @@ function downloadFinalWidgetHtml(m: ChatMessage, idx: number) {
                     </div>
                   </template>
                   <template v-else-if="m.role === 'assistant' && assistantStreamPlain(idx)">
-                    <div class="whitespace-pre-wrap">{{ m.content }}</div>
+                    <div class="whitespace-pre-wrap">{{ cleanAssistantText(m.content) }}</div>
                   </template>
                   <template v-else-if="m.role === 'assistant'">
-                    <div class="assistant-markdown" v-html="renderAssistantMarkdown(m.content)" />
+                    <div class="assistant-markdown" v-html="renderAssistantMarkdown(cleanAssistantText(m.content))" />
                   </template>
                   <template v-else>
                     <div class="whitespace-pre-wrap">{{ m.content }}</div>
@@ -1171,7 +1133,6 @@ function downloadFinalWidgetHtml(m: ChatMessage, idx: number) {
               v-if="
                 m.role === 'assistant' &&
                 m.widgetStreaming &&
-                !m.widgetHtml &&
                 !m.widgetSchema &&
                 (m.widgetStream || (widgetGenerating && widgetGeneratingIdx === idx))
               "
@@ -1210,62 +1171,21 @@ function downloadFinalWidgetHtml(m: ChatMessage, idx: number) {
                   </div>
                 </div>
                 <div class="p-3">
-                  <LiveWidgetFrame
-                    v-if="m.widgetMode === 'html'"
-                    :raw-stream="m.widgetStream || ''"
-                    :final-html="m.widgetHtml || ''"
-                    :finalized="!!m.widgetHtml"
-                    :height="widgetFrameHeight(m.widgetHeight)"
-                  />
-                  <LiveWidgetSchema
-                    v-else
-                    :raw-stream="m.widgetStream || ''"
-                    :finalized="false"
+                  <!-- Live block-by-block build: render complete blocks from the partial stream
+                       (salvage parser drops the in-progress block); the chart appears the moment
+                       its JSON closes. -->
+                  <WidgetSchemaRenderer
+                    :json-str="m.widgetStream || ''"
+                    :show-download="false"
+                    :streaming="true"
                   />
                 </div>
-              </div>
-            </Motion>
-
-            <!-- Final widget (HTML iframe mode). -->
-            <Motion
-              v-if="m.role === 'assistant' && m.widgetHtml && String(m.widgetHtml).trim()"
-              tag="div"
-              class="mt-2"
-              :initial="{ opacity: 0, y: 16 }"
-              :animate="{ opacity: 1, y: 0 }"
-              :transition="MOTION_BASE"
-            >
-              <div
-                class="rounded-2xl border bg-card overflow-hidden shadow-sm transition-shadow duration-300 hover:shadow-md"
-              >
-                <div class="px-4 py-2 border-b text-xs text-muted-foreground flex items-center justify-between gap-2">
-                  <div class="flex items-center gap-2 min-w-0">
-                    <span class="h-1.5 w-1.5 rounded-full bg-emerald-500 shrink-0" />
-                    <span class="truncate">Interactive widget</span>
-                  </div>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    class="h-7 px-2 shrink-0"
-                    title="Download widget as HTML"
-                    @click="downloadFinalWidgetHtml(m, idx)"
-                  >
-                    <ArrowDownTrayIcon class="h-3.5 w-3.5" />
-                  </Button>
-                </div>
-                <iframe
-                  :srcdoc="m.widgetHtml"
-                  sandbox="allow-scripts allow-same-origin"
-                  class="w-full widget-frame border-0"
-                  :style="{ height: `${widgetFrameHeight(m.widgetHeight)}px`, maxHeight: '56vh' }"
-                />
               </div>
             </Motion>
 
             <!-- Final widget (JSON schema mode). -->
             <Motion
-              v-if="m.role === 'assistant' && m.widgetSchema && String(m.widgetSchema).trim() && !m.widgetHtml"
+              v-if="m.role === 'assistant' && m.widgetSchema && String(m.widgetSchema).trim()"
               tag="div"
               class="mt-2"
               :initial="{ opacity: 0, y: 16 }"
@@ -1280,7 +1200,11 @@ function downloadFinalWidgetHtml(m: ChatMessage, idx: number) {
                   Interactive widget
                 </div>
                 <div class="p-4">
-                  <WidgetSchemaRenderer :json-str="m.widgetSchema" :download-base="widgetDownloadBase(m, idx)" />
+                  <WidgetSchemaRenderer
+                    :json-str="m.widgetSchema"
+                    :download-base="widgetDownloadBase(m, idx)"
+                    @action="onWidgetAction"
+                  />
                 </div>
               </div>
             </Motion>

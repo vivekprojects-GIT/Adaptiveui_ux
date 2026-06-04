@@ -40,7 +40,7 @@
     {
       "id": "visualization",
       "label": "Visualization",
-      "instruction": "Return a simple TEXT visualization only (ASCII bar chart or small table-of-values). Put it in a fenced code block. No extra prose outside the code block.",
+      "instruction": "Write a brief 1-2 sentence lead-in that frames what the visual shows. The chart/widget carries the visualization. NEVER draw ASCII charts, tree diagrams, or text-art in the response.",
       "enabled": true
     },
     {

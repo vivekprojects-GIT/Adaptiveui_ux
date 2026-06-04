@@ -54,7 +54,18 @@
         "graph",
         "boxplot",
         "bubble",
-        "histogram"
+        "histogram",
+        "timeseries",
+        "rose",
+        "polar",
+        "parallel",
+        "themeriver",
+        "tree",
+        "mindmap",
+        "org",
+        "scatter3d",
+        "bar3d",
+        "line3d"
       ],
       "spec": [
         "Pick \"kind\" to fit the data; ONLY these kinds render:",
@@ -79,6 +90,17 @@
         "- sankey | graph (flows / network) -> \"nodes\" + \"links\":",
         "  { \"type\": \"chart\", \"chart\": { \"kind\": \"sankey\", \"nodes\": [ {\"name\":\"Revenue\"}, {\"name\":\"COGS\"}, {\"name\":\"Gross Profit\"} ], \"links\": [ {\"source\":\"Revenue\",\"target\":\"COGS\",\"value\":40}, {\"source\":\"Revenue\",\"target\":\"Gross Profit\",\"value\":60} ] } }",
         "- histogram (frequency) -> like bar: \"x_categories\" (bins) + one series of counts.",
+        "- timeseries (interactive time trend with zoom/pan) -> like line: \"x_categories\" (dates) + series of numbers. Best for many points over time.",
+        "- rose (nightingale / 'pizza' chart — share with variable-radius slices) -> use \"items\": [ { \"label\", \"value\" } ].",
+        "- polar (categorical bars around a circle) -> \"x_categories\" + series of numbers (like bar).",
+        "- parallel (compare items across many dimensions) -> \"x_categories\" = dimension names; one series per item with \"values\" aligned to them.",
+        "  { \"type\": \"chart\", \"chart\": { \"kind\": \"parallel\", \"x_categories\": [\"P/E\",\"Margin\",\"Growth\"], \"series\": [ { \"name\": \"AAPL\", \"values\": [28, 25, 8] }, { \"name\": \"MSFT\", \"values\": [34, 42, 14] } ] } }",
+        "- themeriver (streamgraph of categories over time; keep to a handful of time points) -> \"x_categories\" (time) + one series per category with \"values\" aligned to them.",
+        "- tree | mindmap | org (hierarchy / mind map / org chart) -> a single \"root\" node with nested \"children\":",
+        "  { \"type\": \"chart\", \"chart\": { \"kind\": \"tree\", \"root\": { \"name\": \"Apple\", \"children\": [ { \"name\": \"Products\", \"children\": [ {\"name\":\"iPhone\"}, {\"name\":\"Mac\"} ] }, { \"name\": \"Services\" } ] } } }",
+        "  (use \"mindmap\" for a radial layout, \"org\" for top-down. Keep to a readable number of nodes.)",
+        "- scatter3d | bar3d | line3d (THREE numeric axes; keep to a handful of points) -> series with [x, y, z] triples:",
+        "  { \"type\": \"chart\", \"chart\": { \"kind\": \"scatter3d\", \"x_label\": \"Risk\", \"y_label\": \"Return\", \"series\": [ { \"name\": \"Funds\", \"values\": [ [8,12,500], [14,18,1200] ] } ] } }",
         "For a correlation matrix you MUST use kind \"heatmap\" with \"matrix\" (never a line/bar series)."
       ],
       "example": {
@@ -133,16 +155,22 @@
     },
     {
       "type": "action_row",
-      "whenToUse": "Suggested follow-up actions / next prompts as buttons.",
+      "whenToUse": "Buttons to RE-VISUALIZE the SAME data already shown as a different supported chart kind. Each button's label is sent back as the next prompt.",
       "spec": [
-        "{ \"type\": \"action_row\", \"id\": \"...\", \"buttons\": [ { \"id\": \"...\", \"label\": \"...\", \"intent\": \"...\" }, ... ] }"
+        "{ \"type\": \"action_row\", \"buttons\": [ { \"label\": \"Show as <supported chart kind>\", \"intent\": \"...\" }, ... ] }",
+        "VISUALS ONLY — buttons MUST only offer to redraw the data ALREADY shown using a different supported chart kind (e.g. \"Show as bar chart\", \"View as treemap\", \"Show as pie\", \"View as horizontal bars\", \"Show as line trend\").",
+        "NEVER propose actions that require data you may not have: no new tickers/companies, no new time periods, no \"compare X vs Y\", no growth/peers/forecasts, no \"explain ...\". Only chart-type changes of the current data."
       ],
       "example": {
         "type": "action_row",
         "buttons": [
           {
-            "label": "Show risks",
-            "intent": "show_risks"
+            "label": "Show as treemap",
+            "intent": "view_treemap"
+          },
+          {
+            "label": "View as horizontal bars",
+            "intent": "view_hbar"
           }
         ]
       }

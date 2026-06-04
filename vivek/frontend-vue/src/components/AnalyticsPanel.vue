@@ -26,7 +26,7 @@ const rewardWindowSize = 50
 
 const metrics = computed(() => {
   const done = analyticsState.doneEvents
-  const widgetRenderedCount = done.filter((d) => (d.widgetHtml ?? '').trim().length > 0).length
+  const widgetRenderedCount = done.filter((d) => (d.widgetSchema ?? '').trim().length > 0).length
   const widgetTotal = done.length
 
   return {

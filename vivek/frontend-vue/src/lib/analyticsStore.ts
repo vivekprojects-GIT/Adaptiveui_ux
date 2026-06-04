@@ -4,7 +4,7 @@ export type DoneEventForAnalytics = {
   ts: number
   strategy: string
   elapsed: number | null | undefined
-  widgetHtml: string
+  widgetSchema: string
 }
 
 export type RewardEventForAnalytics = {
@@ -32,15 +32,15 @@ const MAX_EVENTS = 300
 export function ingestDone(evt: {
   strategy: string
   elapsed?: number | null
-  widget_html?: string
-  widgetHtml?: string
+  widget_schema?: string
+  widgetSchema?: string
 }) {
-  const widgetHtml = (evt.widgetHtml ?? evt.widget_html ?? '') as string
+  const widgetSchema = (evt.widgetSchema ?? evt.widget_schema ?? '') as string
   analyticsState.doneEvents.push({
     ts: Date.now(),
     strategy: evt.strategy,
     elapsed: evt.elapsed,
-    widgetHtml,
+    widgetSchema,
   })
   if (analyticsState.doneEvents.length > MAX_EVENTS) {
     analyticsState.doneEvents.splice(0, analyticsState.doneEvents.length - MAX_EVENTS)
@@ -63,7 +63,7 @@ export function ingestReward(evt: { strategy: string; reward: number; predictedR
 export function computeWidgetRenderRate(): number {
   const ds = analyticsState.doneEvents
   if (!ds.length) return 0
-  const withWidgets = ds.filter((d) => (d.widgetHtml ?? '').trim().length > 0).length
+  const withWidgets = ds.filter((d) => (d.widgetSchema ?? '').trim().length > 0).length
   return withWidgets / ds.length
 }
 
