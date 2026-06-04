@@ -1,5 +1,11 @@
 # Vivek: Adaptive Presentation Engine — Complete Reference
 
+> ⚠️ **Legacy/partial.** Parts of this long reference predate the components-only widget
+> refactor (it still references HTML/iframe widgets, `index.html` SPA, etc.). For the
+> **current** widget pipeline (registry → prompt menu → synthesizer → validate → Vue
+> components / ECharts, no HTML/iframe), see [`ARCHITECTURE.md`](./ARCHITECTURE.md). The
+> bandit/Part-A sections below remain broadly accurate.
+
 A professional, modular backend demonstrating Bayesian strategy selection and real-time posterior updating. This app learns user preferences and adapts its response format (bullet points, prose, questions, etc.) based on observed rewards.
 
 ---

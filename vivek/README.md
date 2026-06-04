@@ -4,33 +4,47 @@ app_port: 7860
 ---
 # Adaptive Presentation Engine — Demo
 
-A web demo of the Contextual Hierarchical Bayesian Architecture pipeline.
+A chat app where Claude answers a question **and** generates an interactive widget for it.
+Widgets are built **only from the app's own UI components** (a registry), as JSON — **no
+LLM-generated HTML, no iframe, no external chart libraries**. Charts render with bundled
+ECharts. A per-user Thompson-Sampling bandit adapts the prose-answer style independently.
 
-## Project structure (modular layout)
+> **Architecture:** see [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the full registry →
+> prompt-menu → synthesizer → validate → components pipeline (Part B / visualization).
+
+## Project structure
 
 ```
 vivek/
-├── frontend/           # UI assets
-│   ├── index.html      # Single-page app (chat, widgets, posterior viz)
-│   └── README.md       # Frontend documentation
-├── backend/            # Python API and logic
-│   ├── config.py       # Env vars, LLM modes, Thompson Sampling params
-│   ├── server.py       # HTTP server, API routes, serves frontend at GET /
-│   ├── llm.py          # Anthropic and OpenAI-compatible LLM calls
-│   ├── engine.py       # Bayesian engine (Thompson Sampling)
-│   ├── widget_prompt.py
-│   ├── combined_prompt.py
-│   └── primitives.json # Strategy definitions
-├── app.py              # Entry point
+├── frontend-vue/                 # Vue 3 + Vite + TypeScript SPA (the live UI)
+│   ├── src/
+│   │   ├── widget-registry.json  # SINGLE SOURCE: block types + 33 chart kinds + data shapes
+│   │   ├── lib/widgetRegistry.ts # type → Vue component map (RENDER)
+│   │   ├── lib/echartsOption.ts  # shared ECharts option builder (live render + HTML export)
+│   │   ├── lib/exportWidgetHtml.ts # deterministic widget → standalone interactive HTML
+│   │   ├── components/WidgetRegistryRenderer.vue  # parses widget JSON → <component :is>
+│   │   ├── components/WidgetSchemaChart.vue       # ECharts chart component
+│   │   └── components/widgets/*.vue               # TextBlock, KpiRow, ChartBlock, ...
+│   └── dist/                     # built SPA (served by the backend in prod)
+├── backend/
+│   ├── config.py                 # env, LLM modes, bandit params, strategy loading
+│   ├── server.py                 # FastAPI: auth, /api/chat[_stream], /api/rate, serves SPA
+│   ├── llm.py                    # Anthropic + OpenAI-compatible calls
+│   ├── engine.py                 # Thompson-Sampling bandit (text strategy)
+│   ├── combined_prompt.py        # builds the combined prompt; registry → menu; validation
+│   ├── db.py / auth.py / utils.py
+├── strategies.json               # bandit text strategies (admin-manageable)
+├── app.py                        # entry point
 ├── requirements.txt
-├── .env.example        # Template for API keys (copy to .env)
-└── .env                # Your keys (gitignored)
+├── .env.example                  # template (copy to .env; .env is gitignored)
+└── ARCHITECTURE.md
 ```
 
 ## What it shows
-- **Live strategy selection** via Thompson Sampling over the Bayesian posterior
+- **Components-only widgets** — 9 block types + 33 chart kinds, all from the registry
+- **Live strategy selection** via Thompson Sampling (text style only)
 - **Posterior updating in real-time** as you rate responses (👍 / 👎)
-- **Feature vector** used for each inference
+- **Feature vector** (`x ∈ ℝ¹⁰`) used for each inference
 - **Per-strategy expected reward** estimates that evolve with each interaction
 
 ---
@@ -79,7 +93,7 @@ http://localhost:5051   # or PORT from env (Docker uses 7860)
 ## Pipeline stages shown
 | Stage | What the demo shows |
 |---|---|
-| Feature extraction | Feature vector panel (x ∈ ℝ⁸) |
+| Feature extraction | Feature vector panel (x ∈ ℝ¹⁰) |
 | Thompson Sampling | Expected reward % per strategy |
 | LLM rendering | Live response with strategy label |
 | Reward observation | 👍/👎 buttons |
