@@ -14,6 +14,15 @@ import threading
 # Load .env into os.environ; override=True lets existing env vars win (Docker/CI).
 load_dotenv(override=True)
 
+# Some environments (e.g. Claude Code / Anthropic CLI tooling) export an EMPTY
+# ANTHROPIC_AUTH_TOKEN (and similar). The Anthropic SDK then prefers bearer auth and
+# emits an invalid "Authorization: Bearer " header with no token, which httpx rejects
+# and the SDK reports as APIConnectionError ("Connection error") on every call. Drop
+# blank values so the SDK falls back to ANTHROPIC_API_KEY (x-api-key).
+for _blank_var in ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_CUSTOM_HEADERS"):
+    if not (os.environ.get(_blank_var) or "").strip():
+        os.environ.pop(_blank_var, None)
+
 # -----------------------------------------------------------------------------
 # LLM provider and endpoint routing
 # -----------------------------------------------------------------------------

@@ -190,24 +190,18 @@ def _json_layout_is_only_numeric_index_arrays(schema_str: str) -> bool:
 
 def _dispatch_json_mode_widget(widget_payload_raw: str) -> tuple[str, str, int, str]:
     """
-    Prefer a valid JSON schema for the Vue renderer. If the model returned
-    HTML instead, fall back to iframe HTML. Returns
-    (widget_schema, widget_html, widget_height, widget_debug_tag).
+    STRICT components-only: always resolve to a JSON schema rendered by the registry
+    components. The HTML escape-hatch is DISABLED — model-generated HTML is never
+    rendered. Returns (widget_schema, widget_html, widget_height, widget_debug_tag);
+    widget_html is always "".
     """
     raw = (widget_payload_raw or "").strip()
     if not raw:
         return "", "", 0, ""
+
     finalized = finalize_widget_schema_json(raw)
     if widget_schema_json_is_valid(finalized) and not _json_layout_is_only_numeric_index_arrays(finalized):
         return finalized, "", 0, "json_schema_ok"
-    doc = extract_embeddable_html_document(raw)
-    if doc:
-        full = inject_design_system(doc)
-        if _looks_truncated_widget_html(full):
-            if _json_layout_is_only_numeric_index_arrays(finalized):
-                return "", "", 0, "json_html_fallback_truncated"
-            return finalized, "", 0, "json_html_fallback_truncated"
-        return "", full, estimate_widget_height(full), "json_html_fallback"
     if _json_layout_is_only_numeric_index_arrays(finalized):
         return "", "", 0, "json_degenerate_layout"
     return finalized, "", 0, "json_schema_invalid"

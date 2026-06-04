@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from typing import Any, Tuple
 
 from . import config
@@ -57,7 +58,7 @@ def parse_widget_schema_object(s: str) -> Any | None:
         return None
 
 
-_BLOCK_TYPES = frozenset({"text", "kpi_row", "chart", "table", "action_row", "image"})
+_BLOCK_TYPES = frozenset({"text", "kpi_row", "chart", "table", "action_row", "image", "stat_card", "progress", "badge_row"})
 
 _TYPE_ALIASES: dict[str, str] = {
     "markdown": "text",
@@ -135,6 +136,131 @@ def _sanitize_layout(layout: list[Any]) -> list[dict[str, Any]]:
     return [_normalize_layout_block(e) for e in layout]
 
 
+# ── Registry-driven validation (keeps streaming; cleans the FINAL schema) ────
+# Reads the SAME widget-registry.json used by the renderer to (1) drop block
+# types the renderer can't draw, and (2) drop blocks with no renderable data
+# (e.g. a chart with an unsupported kind or no data) — so the finalized widget
+# never shows a blank/garbage block.
+_REGISTRY_CACHE: dict[str, Any] | None = None
+
+
+def _load_registry() -> dict[str, Any]:
+    global _REGISTRY_CACHE
+    if _REGISTRY_CACHE is None:
+        try:
+            _REGISTRY_CACHE = json.loads(Path(__file__).resolve().parent.parent / "frontend-vue" / "src" / "widget-registry.json")  # type: ignore[arg-type]
+        except Exception:
+            try:
+                _REGISTRY_CACHE = json.loads(
+                    (Path(__file__).resolve().parent.parent / "frontend-vue" / "src" / "widget-registry.json").read_text(encoding="utf-8")
+                )
+            except Exception:
+                _REGISTRY_CACHE = {}
+    return _REGISTRY_CACHE or {}
+
+
+def _registry_block_types() -> set[str]:
+    blocks = _load_registry().get("blocks") or []
+    types = {str(b.get("type")).lower() for b in blocks if isinstance(b, dict) and b.get("type")}
+    return types or set(_BLOCK_TYPES)
+
+
+def _registry_chart_kinds() -> set[str]:
+    for b in _load_registry().get("blocks") or []:
+        if isinstance(b, dict) and str(b.get("type")).lower() == "chart":
+            kinds = b.get("kinds")
+            if isinstance(kinds, list) and kinds:
+                return {str(k).lower() for k in kinds}
+    return {"line", "bar", "area", "scatter", "heatmap", "pie", "donut"}
+
+
+def _nonempty_list(v: Any) -> bool:
+    return isinstance(v, list) and len(v) > 0
+
+
+def _chart_has_data(chart: dict[str, Any]) -> bool:
+    kind = str(chart.get("kind") or "line").lower()
+    if kind not in _registry_chart_kinds():
+        return False
+    if kind == "heatmap":
+        m = chart.get("matrix")
+        return isinstance(m, list) and any(isinstance(r, list) and len(r) for r in m)
+    if kind == "candlestick":
+        return _nonempty_list(chart.get("candles"))
+    if kind == "boxplot":
+        return _nonempty_list(chart.get("boxes"))
+    if kind in {"sankey", "graph"}:
+        return _nonempty_list(chart.get("links"))
+    if kind in {"pie", "donut", "funnel", "treemap", "sunburst", "waterfall", "gauge"}:
+        if _nonempty_list(chart.get("items")):
+            return True
+        s = chart.get("series")
+        return isinstance(s, list) and any(isinstance(x, dict) and x.get("values") for x in s)
+    # line | bar | hbar | area | scatter | bubble | stacked | combo | histogram | radar
+    s = chart.get("series")
+    return isinstance(s, list) and any(
+        isinstance(x, dict) and isinstance(x.get("values"), list) and len(x.get("values")) for x in s
+    )
+
+
+_NUMERIC_ARRAY_RE = re.compile(r"^\s*\[\s*-?\d+(\.\d+)?(\s*,\s*-?\d+(\.\d+)?)*\s*\]\s*$")
+
+
+def _block_is_renderable(b: dict[str, Any]) -> bool:
+    t = str(b.get("type") or "").lower()
+    if t == "text":
+        content = str(b.get("content") or "").strip()
+        # Drop bare numeric arrays (e.g. tic-tac-toe win lines "[0,1,2]") — that's not prose.
+        return bool(content) and not _NUMERIC_ARRAY_RE.match(content)
+    if t == "kpi_row":
+        items = b.get("items")
+        return isinstance(items, list) and any(
+            isinstance(it, dict) and str(it.get("value", "")).strip() for it in items
+        )
+    if t == "chart":
+        chart = b.get("chart")
+        return isinstance(chart, dict) and _chart_has_data(chart)
+    if t == "table":
+        rows = b.get("rows")
+        return isinstance(rows, list) and len(rows) > 0
+    if t == "action_row":
+        btns = b.get("buttons")
+        return isinstance(btns, list) and len(btns) > 0
+    if t == "image":
+        return bool(str(b.get("src") or "").strip())
+    if t == "stat_card":
+        items = b.get("items")
+        return isinstance(items, list) and any(
+            isinstance(it, dict) and str(it.get("value", "")).strip() for it in items
+        )
+    if t == "progress":
+        items = b.get("items")
+        return isinstance(items, list) and any(
+            isinstance(it, dict) and it.get("value") is not None for it in items
+        )
+    if t == "badge_row":
+        items = b.get("items")
+        return isinstance(items, list) and any(
+            isinstance(it, dict) and str(it.get("label", "")).strip() for it in items
+        )
+    return False
+
+
+def _validate_layout_against_registry(layout: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop unknown block types and blocks with no renderable data."""
+    valid_types = _registry_block_types()
+    out: list[dict[str, Any]] = []
+    for b in layout:
+        if not isinstance(b, dict):
+            continue
+        if str(b.get("type") or "").lower() not in valid_types:
+            continue
+        if not _block_is_renderable(b):
+            continue
+        out.append(b)
+    return out
+
+
 def coerce_widget_schema_root(obj: Any) -> dict[str, Any] | None:
     """Ensure root has layout: [] (alias blocks/components; wrap bare arrays)."""
     if obj is None:
@@ -168,7 +294,7 @@ def coerce_widget_schema_root(obj: Any) -> dict[str, Any] | None:
         block = dict(out)
         out = {"version": str(ver or "1.0"), "layout": [block]}
     if isinstance(out.get("layout"), list):
-        out["layout"] = _sanitize_layout(out["layout"])
+        out["layout"] = _validate_layout_against_registry(_sanitize_layout(out["layout"]))
     return out
 
 
@@ -259,19 +385,90 @@ WIDGET JSON SCHEMA MODE (WIDGET_MODE=json):
   - image (photos, diagrams, icons, illustrations — any raster or SVG via URL/data URI):
     { "type": "image", "id": "...", "title": "...", "src": "https://... OR data:image/png;base64,...", "alt": "accessible description", "caption": "optional caption", "fit": "contain|cover" }
 
-Data grounding:
-- Prefer data from user message or <RESPONSE>. When real data is unavailable, use illustrative/mock data and label it clearly (e.g. "Example data", "Mock data").
+Data grounding (STRICT — the widget must mirror your <RESPONSE>):
+- Use ONLY the exact numbers and labels stated in your <RESPONSE>. Do NOT invent values, round differently, or add labels/values not written in <RESPONSE>.
+- For category charts, "x_categories" MUST be the exact entity/segment names you named in <RESPONSE> (e.g. "Data Center", "Gaming") — NEVER 0, 1, 2. Each series value MUST equal the number in <RESPONSE>, aligned to those categories.
+- KPI/stat/progress values and labels must also be the exact ones from <RESPONSE>.
+- If <RESPONSE> does not state a number or its label, do not put it in the widget (state it in <RESPONSE> first, or omit it).
+
+Honoring an explicitly requested chart type:
+- If the user asks for a SPECIFIC chart type (e.g. "as a candlestick", "show a sankey", "pie chart") and it IS one of the supported kinds above, you MUST use exactly that kind — do not substitute another.
+- If the requested chart type is NOT in the supported kinds (e.g. 3D surface, map/choropleth, gantt, renko, marimekko, etc.), DO NOT silently render a different chart. Instead: in <RESPONSE>, say plainly that you cannot render that specific chart type yet, then name 1-3 supported kinds that would fit their data well and ask if they'd like one of those. In that case return <WIDGET></WIDGET> (empty) — wait for the user to confirm before rendering an alternative.
+- Never pretend an unsupported type is supported, and never relabel a different chart as the requested type.
 
 Interactivity:
 - Use action_row buttons to request follow-ups via intent strings (e.g., "explain_methodology", "show_risks").
-- GAMES, TOYS, and CUSTOM APPS (tic-tac-toe, puzzles, interactive demos, any playable UI): you MUST output a **complete HTML document** (`<html>...</html>` with CSS/JS) inside `<WIDGET>`, NOT a JSON schema. JSON blocks cannot represent a real game board — never dump raw index arrays like `[0,1,2]` as layout items.
-- If the user needs true controls (sliders, inputs, live calculator), rich HTML/SVG/canvas, or complex layouts that JSON blocks cannot express, you MAY put a complete mini HTML document (with inline JS) inside <WIDGET> instead of JSON — the app will still render it. Prefer JSON when charts/KPIs/tables/images suffice.
-- For photographs, diagrams, or icons in JSON mode, use the `image` block with a valid https:// URL or a data: URI. Combine `image` with `text`, `chart`, and `table` blocks as needed.
+- OUTPUT JSON ONLY. Never output HTML, <script>, <style>, <canvas>, raw markup, or code inside <WIDGET> — only the JSON schema above. There is no HTML mode.
+- If something cannot be expressed with the supported block types (e.g. a playable game, live sliders), DO NOT invent HTML — return <WIDGET></WIDGET> (empty) and explain in <RESPONSE> instead. Never dump raw index arrays like `[0,1,2]`.
+- For photographs, diagrams, or icons, use the `image` block with a valid https:// URL or a data: URI. Combine `image` with `text`, `chart`, and `table` blocks as needed.
 
 Dynamic layout (JSON) — avoid static, single-block dashboards:
 - Shape `layout` like a short story: context first, then metrics, then detail, then actions. Mix block types (text, kpi_row, chart, table, image, action_row) whenever it improves scanning; do not default to one lonely chart if KPIs or a sentence of framing would help.
 - Use `action_row` for obvious follow-up intents; keep blocks ordered top-to-bottom by importance so the widget feels purposeful, not generic.
 """
+
+
+# ── Registry-driven prompt vocabulary ───────────────────────────────────────
+# Single source of truth: frontend-vue/src/widget-registry.json. The SAME file
+# the Vue renderer uses to resolve block types is read here to generate the
+# "supported block types" section of the prompt — so GENERATE and RENDER can
+# never drift. Falls back to the static _JSON_WIDGET_RULE if the file is absent.
+_REGISTRY_JSON_PATH = Path(__file__).resolve().parent.parent / "frontend-vue" / "src" / "widget-registry.json"
+
+_JSON_RULE_PREAMBLE = """WIDGET JSON SCHEMA MODE (WIDGET_MODE=json):
+- The content inside <WIDGET> MUST be valid JSON (no markdown fences, no comments).
+- Root object: { "version": "1.0", "layout": [ ... ] }
+- layout is an ordered array of blocks (top-to-bottom).
+- Supported block types ONLY (do not invent new ones):"""
+
+_JSON_RULE_TRAILER = """
+Data grounding (STRICT — the widget must mirror your <RESPONSE>):
+- Use ONLY the exact numbers and labels stated in your <RESPONSE>. Do NOT invent values, round differently, or add labels/values not written in <RESPONSE>.
+- For category charts, "x_categories" MUST be the exact entity/segment names you named in <RESPONSE> (e.g. "Data Center", "Gaming") — NEVER 0, 1, 2. Each series value MUST equal the number in <RESPONSE>, aligned to those categories.
+- KPI/stat/progress values and labels must also be the exact ones from <RESPONSE>.
+- If <RESPONSE> does not state a number or its label, do not put it in the widget (state it in <RESPONSE> first, or omit it).
+
+Honoring an explicitly requested chart type:
+- If the user asks for a SPECIFIC chart type (e.g. "as a candlestick", "show a sankey", "pie chart") and it IS one of the supported kinds above, you MUST use exactly that kind — do not substitute another.
+- If the requested chart type is NOT in the supported kinds (e.g. 3D surface, map/choropleth, gantt, renko, marimekko, etc.), DO NOT silently render a different chart. Instead: in <RESPONSE>, say plainly that you cannot render that specific chart type yet, then name 1-3 supported kinds that would fit their data well and ask if they'd like one of those. In that case return <WIDGET></WIDGET> (empty) — wait for the user to confirm before rendering an alternative.
+- Never pretend an unsupported type is supported, and never relabel a different chart as the requested type.
+
+Interactivity:
+- Use action_row buttons to request follow-ups via intent strings (e.g., "explain_methodology", "show_risks").
+- OUTPUT JSON ONLY. Never output HTML, <script>, <style>, <canvas>, raw markup, or code inside <WIDGET> — only the JSON schema above. There is no HTML mode.
+- If something cannot be expressed with the supported block types (e.g. a playable game, live sliders), DO NOT invent HTML — return <WIDGET></WIDGET> (empty) and explain in <RESPONSE> instead. Never dump raw index arrays like `[0,1,2]`.
+- For photographs, diagrams, or icons, use the `image` block with a valid https:// URL or a data: URI. Combine `image` with `text`, `chart`, and `table` blocks as needed.
+
+Dynamic layout (JSON) — avoid static, single-block dashboards:
+- Shape `layout` like a short story: context first, then metrics, then detail, then actions. Mix block types whenever it improves scanning; do not default to one lonely chart if KPIs or a sentence of framing would help.
+- Use `action_row` for obvious follow-up intents; keep blocks ordered top-to-bottom by importance so the widget feels purposeful, not generic."""
+
+
+def build_json_widget_rule() -> str:
+    """Generate the WIDGET_MODE=json rule from the shared widget-registry.json."""
+    try:
+        data = json.loads(_REGISTRY_JSON_PATH.read_text(encoding="utf-8"))
+        blocks = data.get("blocks") if isinstance(data, dict) else None
+        if not isinstance(blocks, list) or not blocks:
+            return _JSON_WIDGET_RULE.strip()
+        entries: list[str] = []
+        for b in blocks:
+            if not isinstance(b, dict):
+                continue
+            t = str(b.get("type") or "").strip()
+            when = str(b.get("whenToUse") or "").strip()
+            spec = b.get("spec")
+            if not t or not spec:
+                continue
+            spec_lines = spec if isinstance(spec, list) else [str(spec)]
+            body = "\n".join("    " + str(ln) for ln in spec_lines)
+            header = f"  - {t}" + (f" — {when}" if when else "") + ":"
+            entries.append(f"{header}\n{body}")
+        if not entries:
+            return _JSON_WIDGET_RULE.strip()
+        return _JSON_RULE_PREAMBLE + "\n" + "\n".join(entries) + "\n" + _JSON_RULE_TRAILER
+    except Exception:
+        return _JSON_WIDGET_RULE.strip()
 
 
 # ── Design system injected into combined output ────────────────────────────
@@ -618,7 +815,7 @@ The user's message is only a greeting, thanks, acknowledgement, or goodbye.
 {_DESIGN_SYSTEM_REMINDER}
 {_SENDPROMPT_RULE}"""
         if widget_mode != "json"
-        else _JSON_WIDGET_RULE.strip()
+        else build_json_widget_rule()
     )
 
     combined_max_tokens = getattr(config, "COMBINED_MAX_TOKENS", 7500)

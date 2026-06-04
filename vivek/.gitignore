@@ -30,3 +30,6 @@ Thumbs.db
 
 # adaptiveui.sqlite3 is tracked for GitHub (demo_vivek). Do not push that branch to
 # Hugging Face origin — their hook rejects binary sqlite in git.
+
+# Binary vector store (regenerable; never commit)
+rag_finance/chroma_db/

@@ -7,7 +7,7 @@ import Input from '@/components/ui/Input.vue'
 import Button from '@/components/ui/Button.vue'
 import PreferenceModal from '@/components/PreferenceModal.vue'
 import TechPanels from '@/components/TechPanels.vue'
-import WidgetSchemaRenderer from '@/components/WidgetSchemaRenderer.vue'
+import WidgetSchemaRenderer from '@/components/WidgetRegistryRenderer.vue'
 import LiveWidgetSchema from '@/components/LiveWidgetSchema.vue'
 import LiveWidgetFrame from '@/components/LiveWidgetFrame.vue'
 import { getAccessToken, clearAccessToken } from '@/lib/auth'
@@ -70,6 +70,11 @@ function schemaIsOnlyNumericTupleText(wSch: string): boolean {
     const layout = o.layout
     if (!Array.isArray(layout) || layout.length < 2) return false
     for (const item of layout) {
+      // Bare numeric array layout items (raw stream form, e.g. [0,1,2]) count as tuple junk.
+      if (Array.isArray(item)) {
+        if (!item.every((n) => typeof n === 'number')) return false
+        continue
+      }
       if (!item || typeof item !== 'object') return false
       const rec = item as Record<string, unknown>
       if (String(rec.type || '').toLowerCase() !== 'text') return false
